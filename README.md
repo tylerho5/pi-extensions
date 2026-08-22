@@ -4,6 +4,8 @@ Extensions for the pi coding agent, published as individual npm packages under t
 
 ## Packages
 
+⚠️ = prototype (patches pi internals; may break across pi versions — pin your pi version).
+
 | Package | Description |
 |---|---|
 | [`@tylerho/pi-advisor`](packages/pi-advisor) | A stronger reviewer model the main agent can consult mid-turn for strategic guidance, ported from Claude Code. |
@@ -25,8 +27,6 @@ Extensions for the pi coding agent, published as individual npm packages under t
 | [`@tylerho/pi-web-fetch`](packages/pi-web-fetch) | Fetches a URL and converts it to markdown, with a Jina reader fallback and an optional cheap-model answer pass. |
 | [`@tylerho/pi-workflows`](packages/pi-workflows) | Sandboxed multi-agent workflow orchestration, plus a deterministic multi-angle code review built on it. |
 | [`@tylerho/pi-worktree`](packages/pi-worktree) | Lets the agent create, enter, and exit isolated git worktrees for parallel work in one repo. |
-
-⚠️ = prototype (patches pi internals; may break across pi versions — pin your pi version).
 
 ## Install
 
