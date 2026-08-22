@@ -1,0 +1,11 @@
+{
+  "pi": {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "effort": "max"
+  },
+  "claude": {
+    "model": "sonnet",
+    "effort": "high"
+  }
+}

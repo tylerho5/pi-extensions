@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-prompt-stash",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Saves and restores the editor's draft text in a single slot via ctrl+s, Claude Code style.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-prompt-stash"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-prompt-stash",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/prompt-stash"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}

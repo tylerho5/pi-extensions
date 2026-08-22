@@ -1,0 +1,36 @@
+{
+  "name": "@tylerho/pi-subagents",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Background subagents on a pi or Claude Code backend, with fire-and-forget spawn and deferred result delivery.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-subagents"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-subagents",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/subagents"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.99",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.216"
+  }
+}

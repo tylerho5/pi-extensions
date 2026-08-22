@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-guard",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Prompts for human confirmation before risky git writes, PR publishing, and recursive rm in the bash tool.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-guard"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-guard",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/guard"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}

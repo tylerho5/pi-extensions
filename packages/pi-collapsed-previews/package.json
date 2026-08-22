@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-collapsed-previews",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Collapses hidden thinking blocks and edit-tool diffs to one-line summaries via runtime prototype patches on pi's TUI.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-collapsed-previews"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-collapsed-previews",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/collapsed-previews"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}

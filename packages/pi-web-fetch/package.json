@@ -1,0 +1,33 @@
+{
+  "name": "@tylerho/pi-web-fetch",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Fetches a URL and converts it to markdown, with a Jina reader fallback and an optional cheap-model answer pass.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-web-fetch"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-web-fetch",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/web-fetch"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "dependencies": {}
+}

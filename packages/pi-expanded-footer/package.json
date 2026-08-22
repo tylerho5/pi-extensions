@@ -1,0 +1,32 @@
+{
+  "name": "@tylerho/pi-expanded-footer",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Replaces the default footer with a Claude Code-style layout: model, context usage, cost, branch, worktree.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-expanded-footer"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-expanded-footer",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/expanded-footer"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {}
+}

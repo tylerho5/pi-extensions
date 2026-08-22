@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-reminders",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Injects dynamic system-reminder messages before each LLM call from a shared generator registry.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-reminders"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-reminders",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/reminders"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}

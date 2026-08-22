@@ -1,0 +1,33 @@
+{
+  "name": "@tylerho/pi-advisor",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A stronger reviewer model the main agent can consult mid-turn for strategic guidance, ported from Claude Code.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-advisor"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-advisor",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/advisor"
+    ]
+  },
+  "peerDependencies": {
+    "typebox": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}

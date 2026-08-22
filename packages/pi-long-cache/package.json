@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-long-cache",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Forces long prompt-cache retention in-process so providers without an explicit opt-in still get caching.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-long-cache"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-long-cache",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/long-cache"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}

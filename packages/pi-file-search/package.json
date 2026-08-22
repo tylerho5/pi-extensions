@@ -1,0 +1,36 @@
+{
+  "name": "@tylerho/pi-file-search",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Adds native fd and rg tools for fast, gitignore-aware file search with automatic binary resolution.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-file-search"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-file-search",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/file-search"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "dependencies": {
+    "@effect/platform-node": "^4.0.0-beta.99",
+    "effect": "^4.0.0-beta.99"
+  }
+}
