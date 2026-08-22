@@ -1,0 +1,32 @@
+{
+  "name": "@tylerho/pi-memory",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Claude Code-style persistent file-based memory, with per-turn recall and idle-triggered consolidation dreams.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-memory"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-memory",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/memory"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "dependencies": {}
+}

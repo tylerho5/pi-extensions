@@ -1,0 +1,15 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "version": "0.0.0",
+  "description": "pi coding agent extensions, published as individual npm packages under the @tylerho scope.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions"
+}

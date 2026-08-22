@@ -1,0 +1,32 @@
+{
+  "name": "@tylerho/pi-worktree",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Lets the agent create, enter, and exit isolated git worktrees for parallel work in one repo.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-worktree"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-worktree",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/worktree"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-copy-all",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Copies the current thread's user and assistant messages to the clipboard as plain text.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-copy-all"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-copy-all",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/copy-all"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}

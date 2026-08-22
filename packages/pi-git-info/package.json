@@ -1,0 +1,34 @@
+{
+  "name": "@tylerho/pi-git-info",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "On-demand /lg diff browser and /pr lookup for the current branch's local changes and open pull request.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-git-info"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-git-info",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/git-info"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.99",
+    "@effect/platform-node": "^4.0.0-beta.99"
+  }
+}

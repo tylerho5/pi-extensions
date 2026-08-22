@@ -1,0 +1,34 @@
+{
+  "name": "@tylerho/pi-ask-user",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A multiple-choice question tool that lets the model ask the user to pick an option or answer freely.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-ask-user"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-ask-user",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/ask-user"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.99"
+  }
+}

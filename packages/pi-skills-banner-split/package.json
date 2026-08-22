@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-skills-banner-split",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Splits the startup banner's Skills section into model-invokable and user-invoked groups.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-skills-banner-split"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-skills-banner-split",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/skills-banner-split"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}

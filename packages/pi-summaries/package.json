@@ -1,0 +1,34 @@
+{
+  "name": "@tylerho/pi-summaries",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Generates a compact recap of each agent run and appends it to the session once the run settles.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-summaries"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-summaries",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/summaries"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.99"
+  }
+}
