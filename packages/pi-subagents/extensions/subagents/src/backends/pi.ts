@@ -40,6 +40,7 @@ import type {
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
 import { BTW_CONTEXT_END, BTW_CONTEXT_START } from "../by-the-way.ts";
+import { addChildCost } from "../../../shared/child-cost.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 import {
   affordableModels,
@@ -564,6 +565,10 @@ const makePiSession = (
             const text = userText(event.message as Message);
             if (text.trim()) emit({ _tag: "UserMessage", text });
           } else if (role === "assistant") {
+            addChildCost(
+              "subagents",
+              (event.message as AssistantMessage).usage?.cost?.total ?? 0,
+            );
             emit({
               _tag: "AssistantMessage",
               parts: assistantParts(event.message as AssistantMessage),

@@ -33,6 +33,7 @@ import type {
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
+import { addChildCost } from "../../../shared/child-cost.ts";
 import {
   CLAUDE_AGENT_SELECTABLE_MODELS,
   loadSubagentModels,
@@ -488,6 +489,7 @@ const makeClaudeSession = (
     };
 
     const handleResult = (result: SDKResultMessage) => {
+      addChildCost("subagents", result.total_cost_usd ?? 0);
       // result.usage is a whole-run aggregate, not occupancy (see
       // contextOccupancyTokens); only the capacity is trustworthy here. The
       // occupancy itself was already emitted by the last assistant message.
