@@ -30,6 +30,7 @@ import {
   loadConfig,
   type TtlConfig,
 } from "../lib/cache-timer.ts";
+import { childCostTotal, resetChildCost } from "../shared/child-cost.ts";
 
 interface Usage {
   input?: number;
@@ -90,7 +91,12 @@ export default function (pi: ExtensionAPI) {
     currentThinkingLevel = event.level;
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
+    // Child cost is session-scoped like the main cost: a fresh session
+    // starts at zero, while resume/fork keep what restored history implies.
+    if (event.reason === "new" || event.reason === "startup") {
+      resetChildCost();
+    }
     // Capture ctx once per session; setFooter closure holds it.
     const capturedCtx = ctx;
     const worktreeName = detectWorktree(ctx.cwd);
@@ -228,10 +234,16 @@ export default function (pi: ExtensionAPI) {
           line1Parts.push(theme.fg("dim", "|"));
           line1Parts.push(ctxDisplay);
 
-          // Cost stays on line 1 after context
+          // Cost stays on line 1 after context. Child spend (subagents,
+          // workflows) shows as a separate `+` term so both are visible.
           if (cost) {
             line1Parts.push(theme.fg("dim", "|"));
-            line1Parts.push(theme.fg("dim", `$${cost.toFixed(3)}`));
+            let costStr = `$${cost.toFixed(3)}`;
+            const childCost = childCostTotal();
+            if (childCost > 0.0005) {
+              costStr += ` +$${childCost.toFixed(3)} agents`;
+            }
+            line1Parts.push(theme.fg("dim", costStr));
           }
 
           let line1 = line1Parts.join(" ");

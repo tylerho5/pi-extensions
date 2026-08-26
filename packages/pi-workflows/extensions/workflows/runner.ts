@@ -30,6 +30,7 @@ import {
   createChildResources,
   shutdownAndDisposeChildSession,
 } from "../shared/child-session.ts";
+import { addChildCost } from "../shared/child-cost.ts";
 import { createToolCallTimeoutGuard } from "../shared/tool-call-timeout.ts";
 import { emptyUsage, type AgentUsage, type TranscriptEntry } from "./model.ts";
 import {
@@ -543,6 +544,7 @@ export async function runAgent(
 
   const childSession = session;
   let usage = emptyUsage();
+  let reportedCost = 0;
   let modelId = childSession.model?.id ?? options.model?.id;
   let contextWindow = childSession.model?.contextWindow;
   let stopReason: string | undefined;
@@ -552,6 +554,12 @@ export async function runAgent(
   const sync = () => {
     const messages = childSession.messages;
     usage = computeUsage(messages);
+    // computeUsage re-sums the whole run; only the delta is new spend.
+    const costDelta = usage.cost - reportedCost;
+    if (costDelta > 0) {
+      reportedCost = usage.cost;
+      addChildCost("workflows", costDelta);
+    }
 
     const sessionModel = childSession.model;
     modelId = sessionModel?.id ?? modelId;
