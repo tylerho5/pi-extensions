@@ -16,7 +16,7 @@ import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
 import { Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isModelVisible } from "../by-the-way.ts";
 import { formatElapsed, type SubagentSnapshot } from "../domain.ts";
-import { formatContextUtilization } from "../format.ts";
+import { formatContextUtilization, formatCost } from "../format.ts";
 import type { SubagentReadModel } from "../manager.ts";
 import { buildTranscriptLines, mergeTranscripts } from "./transcript.ts";
 import { loadPersistedTranscript } from "../persisted/transcript.ts";
@@ -36,6 +36,8 @@ export function statusGlyph(snap: SubagentSnapshot, theme: Theme): string {
       return theme.fg("success", "■");
     case "error":
       return theme.fg("error", "■");
+    case "cancelled":
+      return theme.fg("warning", "■");
   }
 }
 
@@ -47,7 +49,22 @@ export function statusWord(snap: SubagentSnapshot, theme: Theme): string {
       return theme.fg("success", "done");
     case "error":
       return theme.fg("error", "failed");
+    case "cancelled":
+      return theme.fg("warning", "cancelled");
   }
+}
+
+export function takeoverHeader(snap: SubagentSnapshot, theme: Theme): string {
+  const utilization = formatContextUtilization(snap.usage);
+  const cost = formatCost(snap.usage.costUsd);
+  return (
+    `${statusGlyph(snap, theme)} ` +
+    theme.fg("accent", theme.bold(`${snap.id} · ${snap.title}`)) +
+    theme.fg("muted", ` · ${snap.status} · ${formatElapsed(snap)}`) +
+    theme.fg("dim", ` · ${snap.backend}: ${snap.meta.modelLabel ?? "?"}`) +
+    (utilization ? theme.fg("dim", ` · ${utilization}`) : "") +
+    (cost ? theme.fg("dim", ` · ${cost}`) : "")
+  );
 }
 
 // --- Entry points --------------------------------------------------------------
@@ -565,14 +582,7 @@ class TakeoverView implements Component, Focusable {
     }
 
     lines.push(border);
-    const utilization = formatContextUtilization(snap.usage);
-    const header =
-      `${statusGlyph(snap, theme)} ` +
-      theme.fg("accent", theme.bold(`${snap.id} · ${snap.title}`)) +
-      theme.fg("muted", ` · ${snap.status} · ${formatElapsed(snap)}`) +
-      theme.fg("dim", ` · ${snap.backend}: ${snap.meta.modelLabel ?? "?"}`) +
-      (utilization ? theme.fg("dim", ` · ${utilization}`) : "");
-    lines.push(truncateToWidth(header, width));
+    lines.push(truncateToWidth(takeoverHeader(snap, theme), width));
     lines.push(border);
 
     // Fixed-height transcript viewport. Error and scroll status consume rows

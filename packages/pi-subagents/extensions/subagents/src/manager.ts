@@ -28,6 +28,7 @@ import type {
   LiveToolState,
   RunOutcome,
   SpawnTask,
+  SubagentUsage,
   SubagentEvent,
   SubagentOrigin,
   SubagentMeta,
@@ -103,7 +104,7 @@ interface MutableSnapshot {
   settledAt?: number;
   errorText?: string;
   meta: SubagentMeta;
-  usage: { tokens?: number; contextWindow?: number };
+  usage: SubagentUsage;
   transcript: TranscriptItem[];
   liveAssistant?: { text: string; thinking: string };
   liveTools: LiveToolState[];
@@ -316,7 +317,10 @@ const makeManager = Effect.gen(function* () {
         );
         break;
       case "Interrupted":
-        s.status = "error";
+        // A deliberate abort (model cancel tool, dashboard `x`, takeover) is
+        // a distinct terminal state from a genuine failure, so the UI can
+        // report it as cancelled instead of failed.
+        s.status = "cancelled";
         s.errorText = "Run was aborted";
         s.finalText = (outcome.partialText ?? "").slice(
           0,
@@ -436,6 +440,7 @@ const makeManager = Effect.gen(function* () {
         s.usage = {
           tokens: event.tokens ?? s.usage.tokens,
           contextWindow: event.contextWindow ?? s.usage.contextWindow,
+          costUsd: event.costUsd ?? s.usage.costUsd,
         };
         break;
       case "MetaChanged":

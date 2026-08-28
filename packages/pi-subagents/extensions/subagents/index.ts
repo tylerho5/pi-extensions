@@ -52,6 +52,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  costCeiling,
   loadSubagentModels,
   saveSubagentModels,
   type SubagentModels,
@@ -270,12 +271,13 @@ export default function (pi: ExtensionAPI) {
       answer: truncatedOutput(snap),
       sessionFilePath: snap.meta.sessionFilePath,
     });
-    ui?.notify(
-      snap.status === "error"
-        ? `by the way “${snap.title}” failed — reopen it with /btw`
-        : `by the way “${snap.title}” answered — reopen it with /btw`,
-      snap.status === "error" ? "error" : "info",
-    );
+    // Success needs no toast: the btw-result row already says so. A status
+    // line fired mid-turn strands mid-transcript as streaming continues.
+    if (snap.status === "error")
+      ui?.notify(
+        `by the way “${snap.title}” failed — reopen it with /btw`,
+        "error",
+      );
   };
 
   const onSettled = (snap: SubagentSnapshot, consumed: boolean) => {
@@ -624,7 +626,12 @@ export default function (pi: ExtensionAPI) {
           sections.push(`## ${id}\n\n(no longer tracked)`);
           continue;
         }
-        const verb = snap.status === "error" ? "failed" : "finished";
+        const verb =
+          snap.status === "error"
+            ? "failed"
+            : snap.status === "cancelled"
+              ? "cancelled"
+              : "finished";
         let section = `## ${snap.id} "${snap.title}" ${verb}`;
         if (snap.errorText) section += `\nError: ${snap.errorText}`;
         const headerBytes = Buffer.byteLength(section, "utf8") + 2;
@@ -790,14 +797,19 @@ export default function (pi: ExtensionAPI) {
     "subagent-result",
     (message, { expanded }, theme) => {
       const details = (message.details ?? {}) as Partial<SubagentResultDetails>;
+      const cancelled = details.status === "cancelled";
       const failed = details.status === "error";
-      const icon = failed ? theme.fg("error", "x") : theme.fg("success", "■");
+      const icon = cancelled
+        ? theme.fg("warning", "x")
+        : failed
+          ? theme.fg("error", "x")
+          : theme.fg("success", "■");
       const header =
         `${icon} ` +
         theme.fg("accent", theme.bold(`subagent ${details.id ?? "?"}`)) +
         theme.fg(
           "muted",
-          ` · ${details.title ?? ""} · ${failed ? "failed" : "finished"}`,
+          ` · ${details.title ?? ""} · ${cancelled ? "cancelled" : failed ? "failed" : "finished"}`,
         );
 
       const content =
@@ -849,14 +861,19 @@ export default function (pi: ExtensionAPI) {
     "btw-result",
     (entry, { expanded }, theme) => {
       const data = entry.data;
+      const cancelled = data?.status === "cancelled";
       const failed = data?.status === "error";
-      const icon = failed ? theme.fg("error", "x") : theme.fg("success", "■");
+      const icon = cancelled
+        ? theme.fg("warning", "x")
+        : failed
+          ? theme.fg("error", "x")
+          : theme.fg("success", "■");
       const header =
         `${icon} ` +
         theme.fg("accent", theme.bold(`by the way · ${data?.title ?? "?"}`)) +
         theme.fg(
           "muted",
-          ` · ${failed ? "failed" : "answered"} · ${data?.id ?? "?"}`,
+          ` · ${cancelled ? "cancelled" : failed ? "failed" : "answered"} · ${data?.id ?? "?"}`,
         );
       const body = [
         data?.errorText ? `Error: ${data.errorText}` : "",
@@ -1050,6 +1067,60 @@ export default function (pi: ExtensionAPI) {
           ? `${updated.pi.provider}/${updated.pi.model} · ${updated.pi.effort}`
           : `${updated.claude.model} · ${updated.claude.effort}`;
       ctx.ui.notify(`Default ${harness} subagent: ${chosen}`, "info");
+    },
+  });
+
+  pi.registerCommand("subagent-cost", {
+    description:
+      "Set the output-price ceiling ($/Mtok) for models subagents pick themselves",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        if (ctx.hasUI)
+          ctx.ui.notify(
+            "Subagent cost ceiling selection is only available in the TUI",
+            "error",
+          );
+        return;
+      }
+
+      const current = costCeiling();
+      const raw = await ctx.ui.input(
+        "Subagent cost ceiling ($/Mtok output, off to disable)",
+        current === null ? "off" : `$${current}`,
+      );
+      if (raw === undefined) return;
+
+      const trimmed = raw.trim().replace(/^\$/, "").toLowerCase();
+      if (!trimmed) return;
+
+      let ceiling: number | null;
+      if (trimmed === "off") {
+        ceiling = null;
+      } else {
+        const parsed = Number.parseFloat(trimmed);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          ctx.ui.notify('Enter a positive dollar amount or "off".', "error");
+          return;
+        }
+        ceiling = parsed;
+      }
+
+      try {
+        await saveSubagentModels({
+          ...loadSubagentModels(),
+          costCeiling: ceiling,
+        });
+      } catch {
+        ctx.ui.notify("Could not save the subagent cost ceiling.", "error");
+        return;
+      }
+
+      ctx.ui.notify(
+        ceiling === null
+          ? "Subagent cost ceiling: off"
+          : `Subagent cost ceiling: $${ceiling}/Mtok output`,
+        "info",
+      );
     },
   });
 }

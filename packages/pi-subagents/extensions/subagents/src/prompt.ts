@@ -87,12 +87,17 @@ export const SUBAGENT_LIST_TOOL_DESCRIPTION =
 export function buildSubagentResultMessage(options: {
   id: string;
   title: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "cancelled";
   errorText?: string;
   preview: string;
   sizeLabel: string;
 }) {
-  const verb = options.status === "error" ? "failed" : "finished";
+  const verb =
+    options.status === "error"
+      ? "failed"
+      : options.status === "cancelled"
+        ? "cancelled"
+        : "finished";
   let text = `Subagent ${options.id} "${options.title}" ${verb}.`;
   if (options.errorText) text += `\nError: ${options.errorText}`;
   if (options.preview) text += `\n\n${options.preview}`;

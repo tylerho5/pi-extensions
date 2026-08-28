@@ -7,6 +7,7 @@ export class TaskRailController {
   expanded = false;
   showFinished = false;
   selectedId: string | undefined;
+  private scrollTop = 0;
   private requestRender: (() => void) | undefined;
 
   attach(requestRender: () => void) {
@@ -16,6 +17,7 @@ export class TaskRailController {
   reset() {
     this.expanded = false;
     this.selectedId = undefined;
+    this.scrollTop = 0;
     this.requestRender?.();
   }
 
@@ -44,6 +46,22 @@ export class TaskRailController {
   }
 
   /**
+   * First index of the rendered window: keeps the selection on screen by
+   * scrolling only when it would leave the `rows`-sized window, and clamps
+   * against a list that shrank since the last render.
+   */
+  windowOffset(visible: ReadonlyArray<SubagentSnapshot>, rows: number) {
+    this.reconcile(visible);
+    const index = visible.findIndex((snap) => snap.id === this.selectedId);
+    if (index < 0) return 0;
+    if (index < this.scrollTop) this.scrollTop = index;
+    if (index >= this.scrollTop + rows) this.scrollTop = index - rows + 1;
+    const maxOffset = Math.max(0, visible.length - rows);
+    this.scrollTop = Math.max(0, Math.min(this.scrollTop, maxOffset));
+    return this.scrollTop;
+  }
+
+  /**
    * Move the selection by `delta` without wrapping. Returns:
    * - `"moved"` when the selection changed,
    * - `"atTop"` when `delta` was negative and the selection was already at
@@ -69,6 +87,9 @@ export class TaskRailController {
   }
 }
 
+/** Rows the expanded rail can occupy; longer lists scroll with the selection. */
+const MAX_RAIL_ROWS = 8;
+
 function active(snap: SubagentSnapshot) {
   return snap.status === "running";
 }
@@ -92,9 +113,16 @@ function summary(view: SubagentReadModel) {
 }
 
 function stateText(snap: SubagentSnapshot, theme: Theme) {
-  if (snap.status === "running") return theme.fg("warning", "running");
-  if (snap.status === "done") return theme.fg("success", "done");
-  return theme.fg("error", "failed");
+  switch (snap.status) {
+    case "running":
+      return theme.fg("warning", "running");
+    case "done":
+      return theme.fg("success", "done");
+    case "cancelled":
+      return theme.fg("warning", "cancelled");
+    default:
+      return theme.fg("error", "failed");
+  }
 }
 
 export function createTaskRail(
@@ -116,7 +144,8 @@ export function createTaskRail(
       if (running === 0 && finished === 0) return [];
 
       const visible = visibleRailSubagents(view, controller);
-      controller.reconcile(visible);
+      const start = controller.windowOffset(visible, MAX_RAIL_ROWS);
+      const windowed = visible.slice(start, start + MAX_RAIL_ROWS);
       const header = controller.showFinished ? "Subagents · all" : "Subagents";
       const hint = controller.expanded ? "enter view" : "↓↓ focus";
       // Segments joined with dim separators (rather than one muted wrap) so
@@ -137,7 +166,7 @@ export function createTaskRail(
       ];
       if (!controller.expanded) return lines;
 
-      for (const snap of visible.slice(0, 8)) {
+      for (const snap of windowed) {
         const selected = snap.id === controller.selectedId;
         const marker = selected ? theme.fg("accent", "❯") : " ";
         const title = selected
@@ -152,8 +181,14 @@ export function createTaskRail(
       }
       if (visible.length === 0)
         lines.push(theme.fg("dim", "  no running subagents"));
-      if (visible.length > 8)
-        lines.push(theme.fg("dim", `  … ${visible.length - 8} more`));
+      const above = start;
+      const below = visible.length - start - windowed.length;
+      const indicators = [
+        ...(above > 0 ? [`↑ ${above} above`] : []),
+        ...(below > 0 ? [`… ${below} more`] : []),
+      ];
+      if (indicators.length > 0)
+        lines.push(theme.fg("dim", `  ${indicators.join(" · ")}`));
       return lines;
     },
   };

@@ -192,6 +192,7 @@ const makeStubSession = (
           _tag: "UsageChanged",
           tokens: Math.min(profile.contextWindow, 2400 * (turn + 1) + 900),
           contextWindow: profile.contextWindow,
+          costUsd: 0.42,
         });
         yield* emit({
           _tag: "RunSettled",
