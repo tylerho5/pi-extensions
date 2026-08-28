@@ -77,8 +77,11 @@ export default function (pi: ExtensionAPI) {
 
   const writeRecap = async (ctx: ExtensionContext) => {
     const run = runBoundary.pending();
+    if (!run) return;
+
+    const config = loadSummaryConfig();
     if (
-      !run ||
+      !config.enabled ||
       !sessionActive ||
       !ctx.isIdle() ||
       ctx.hasPendingMessages() ||
@@ -98,7 +101,6 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const config = loadSummaryConfig();
     const controller = new AbortController();
     statusContext = ctx;
     const task = (async () => {
@@ -143,6 +145,7 @@ export default function (pi: ExtensionAPI) {
    */
   const scheduleRecap = (ctx: ExtensionContext) => {
     if (ctx.mode !== "tui" || !sessionActive || !runBoundary.pending()) return;
+    if (!loadSummaryConfig().enabled) return;
     statusContext = ctx;
     cancelScheduled();
     // Recap only once the session has gone quiet, so a user working through
@@ -222,13 +225,14 @@ export default function (pi: ExtensionAPI) {
     statusContext = undefined;
   });
 
-  pi.registerCommand("summary-model", {
-    description: "Choose the model and reasoning level used for run recaps",
+  pi.registerCommand("recap", {
+    description:
+      "Configure run recaps: change the model, or enable/disable them",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") {
         if (ctx.hasUI) {
           ctx.ui.notify(
-            "Summary model selection is only available in the TUI.",
+            "Recap settings are only available in the TUI.",
             "error",
           );
         }
@@ -236,33 +240,56 @@ export default function (pi: ExtensionAPI) {
       }
 
       const current = loadSummaryConfig();
-      const model = await openModelPicker(ctx);
-      if (!model) return;
+      const choice = await ctx.ui.select("Recap", [
+        "Change model…",
+        current.enabled ? "Disable recaps" : "Enable recaps",
+      ]);
+      if (choice === undefined) return;
 
-      const reasoning = await openReasoningPicker(
-        ctx,
-        model,
-        current.reasoning,
-      );
-      if (!reasoning) return;
+      if (choice === "Change model…") {
+        const model = await openModelPicker(ctx);
+        if (!model) return;
 
-      const config = {
-        provider: model.provider,
-        model: model.id,
-        reasoning,
-      };
-      try {
-        await saveSummaryConfig(config);
-      } catch {
+        const reasoning = await openReasoningPicker(
+          ctx,
+          model,
+          current.reasoning,
+        );
+        if (!reasoning) return;
+
+        const config = {
+          enabled: current.enabled,
+          provider: model.provider,
+          model: model.id,
+          reasoning,
+        };
+        try {
+          await saveSummaryConfig(config);
+        } catch {
+          ctx.ui.notify(
+            "Could not save the private summary model config.",
+            "error",
+          );
+          return;
+        }
+
         ctx.ui.notify(
-          "Could not save the private summary model config.",
-          "error",
+          `Summary model: ${config.provider}/${config.model} · ${config.reasoning}`,
+          "info",
         );
         return;
       }
 
+      const config = { ...current, enabled: !current.enabled };
+      try {
+        await saveSummaryConfig(config);
+      } catch {
+        ctx.ui.notify("Could not save the private summary config.", "error");
+        return;
+      }
+      if (!config.enabled) onUserActivity();
       ctx.ui.notify(
-        `Summary model: ${config.provider}/${config.model} · ${config.reasoning}`,
+        config.enabled ? "Recaps enabled." : "Recaps disabled.",
         "info",
       );
     },
