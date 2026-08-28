@@ -19,7 +19,7 @@ A single multiple-choice question tool for the model: `ask_user` shows the user 
 - **Three outcomes.** The user picks an option, writes a custom answer (inline editor), or dismisses (Esc). Dismissal is reported explicitly so the model does not invent an answer.
 - **TUI-only.** Outside TUI mode the tool does not block — it returns a message telling the model to ask in plain text instead.
 - **Validation before UI.** Option count is checked (2–5) and throws a descriptive error before any UI is shown, so the model can retry with corrected parameters.
-- **Custom overlay with self-drawn chrome.** The popup is rendered via `ctx.ui.custom` with its own full-width `─` title bar and bottom rule; every line is truncated to the overlay width (`truncateToWidth`), and rendering is cached between inputs.
+- **Custom overlay with self-drawn chrome.** The popup is rendered via `ctx.ui.custom` with its own full-width `─` title bar and bottom rule; every line is truncated to the overlay width (`truncateToWidth`), option descriptions are word-wrapped to the overlay width before that, and rendering is cached between inputs.
 - **Keyboard model.** `↑`/`↓` cycle options, number keys `1`–`N` jump straight to an option, `Enter` confirms, `Esc` on the options dismisses; inside the custom-answer editor `Enter` submits and `Esc` returns to the options.
 - **Abort handling.** The UI subscribes to the tool-call abort signal; aborts and Effect interrupts both resolve to a "Cancelled" result rather than hanging or throwing.
 

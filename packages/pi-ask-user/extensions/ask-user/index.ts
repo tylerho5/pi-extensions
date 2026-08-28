@@ -288,7 +288,12 @@ export default function askUser(pi: ExtensionAPI) {
               }
 
               if (opt.description) {
-                add(`      ${theme.fg("muted", opt.description)}`);
+                for (const line of wrapText(
+                  opt.description,
+                  Math.max(10, width - 8),
+                )) {
+                  add(`      ${theme.fg("muted", line)}`);
+                }
               }
             }
 
