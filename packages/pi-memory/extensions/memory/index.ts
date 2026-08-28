@@ -25,7 +25,6 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { formatCompactTokens } from "../shared/context-utilization.ts";
 import {
   maybeDream,
   runDreamNow,
@@ -33,6 +32,12 @@ import {
 } from "./src/dream/index.ts";
 import { appendDreamLog, buildDreamLogEntry } from "./src/dream/log.ts";
 import { showDreamLogPane } from "./src/dream/log-pane.ts";
+import {
+  buildDreamOutcomeData,
+  DREAM_OUTCOME_ENTRY,
+  renderDreamOutcome,
+  type DreamOutcomeEntryData,
+} from "./src/dream/outcome.ts";
 import {
   persistDreamAutoEnabled,
   projectOverridesDreamEnabled,
@@ -85,7 +90,11 @@ export default function memory(pi: ExtensionAPI) {
   /**
    * The index is snapshotted per session rather than re-read each turn, both to
    * match Claude Code (which reloads on session start and after compaction) and
-   * to keep the system prompt prefix stable for the cache.
+   * to keep the system prompt prefix stable for the cache. A manual /memory
+   * edit or a completed dream deliberately does NOT refresh it mid-session —
+   * that would change the system prompt and invalidate the cached prefix on
+   * expensive models. Fresh content reaches the model via per-turn recall and
+   * the read tool instead.
    */
   let indexSection: string | undefined;
   let paused = false;
@@ -143,24 +152,9 @@ export default function memory(pi: ExtensionAPI) {
       return;
     }
 
-    const count = result.filesTouched.length;
-    const noun = count === 1 ? "file" : "files";
-    const head =
-      result.status === "aborted"
-        ? "Dream stopped early —"
-        : "Dream consolidated";
-    const cost =
-      result.costUsd !== undefined ? ` · $${result.costUsd.toFixed(2)}` : "";
-    const tokens =
-      result.usage?.tokens !== undefined
-        ? ` · ${formatCompactTokens(result.usage.tokens)} tok`
-        : "";
-    ctx.ui.notify(
-      `✦ ${head} ${count} memory ${noun}${cost}${tokens}.${result.summary ? `\n\n${result.summary}` : ""}`,
-      "info",
-    );
-    // Memory files changed underneath the snapshot; refresh it for the next turn.
-    indexSection = await loadIndexSection(ctx.cwd);
+    // The summary used to ride along in a notification verbatim; the entry
+    // keeps the headline visible and hides the summary behind ctrl+o.
+    pi.appendEntry(DREAM_OUTCOME_ENTRY, buildDreamOutcomeData(result));
   };
 
   const runDreamSession = async (ctx: ExtensionContext, onDemand: boolean) => {
@@ -376,6 +370,14 @@ export default function memory(pi: ExtensionAPI) {
             : "updated",
     });
   });
+
+  pi.registerEntryRenderer(DREAM_OUTCOME_ENTRY, (entry, { expanded }, theme) =>
+    renderDreamOutcome(
+      (entry.data ?? {}) as DreamOutcomeEntryData,
+      expanded,
+      theme,
+    ),
+  );
 
   pi.registerEntryRenderer(MEMORY_WRITE_ENTRY, (entry, { expanded }, theme) => {
     const data = (entry.data ?? {}) as { path?: string; action?: string };
@@ -596,7 +598,6 @@ export default function memory(pi: ExtensionAPI) {
         edited.endsWith("\n") ? edited : `${edited}\n`,
         "utf8",
       );
-      indexSection = await loadIndexSection(ctx.cwd);
       ctx.ui.notify(`Saved ${chosen}`, "info");
     },
   });
