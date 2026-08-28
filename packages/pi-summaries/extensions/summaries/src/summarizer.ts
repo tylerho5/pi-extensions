@@ -4,8 +4,8 @@ import { Data, Effect } from "effect";
 import type { SummaryConfig } from "./config.ts";
 import { buildSummaryPrompt, SUMMARY_SYSTEM_PROMPT } from "./prompt.ts";
 
-const RECAP_MAX_LENGTH = 2_400;
-const NEXT_MAX_LENGTH = 400;
+const RECAP_MAX_LENGTH = 600;
+const NEXT_MAX_LENGTH = 200;
 // Thinking tokens count toward DeepSeek's output budget, so reasoning runs
 // need headroom the JSON never does without it.
 const REASONING_MAX_TOKENS = 8_000;

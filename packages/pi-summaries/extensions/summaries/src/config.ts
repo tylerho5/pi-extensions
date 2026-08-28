@@ -21,12 +21,14 @@ export const REASONING_LEVELS = [
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
 export interface SummaryConfig {
+  readonly enabled: boolean;
   readonly provider: string;
   readonly model: string;
   readonly reasoning: ReasoningLevel;
 }
 
 export const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
+  enabled: true,
   provider: "deepseek",
   model: "deepseek-v4-flash",
   reasoning: "medium",
@@ -66,7 +68,10 @@ const isReasoningLevel = (value: unknown): value is ReasoningLevel =>
 export function parseSummaryConfig(value: unknown) {
   if (!isRecord(value)) return DEFAULT_SUMMARY_CONFIG;
 
+  // Configs written before the /recap toggle have no enabled field.
+  const enabled = value.enabled ?? true;
   if (
+    typeof enabled !== "boolean" ||
     typeof value.provider !== "string" ||
     !value.provider.trim() ||
     typeof value.model !== "string" ||
@@ -77,6 +82,7 @@ export function parseSummaryConfig(value: unknown) {
   }
 
   return {
+    enabled,
     provider: value.provider.trim(),
     model: value.model.trim(),
     reasoning: value.reasoning,
