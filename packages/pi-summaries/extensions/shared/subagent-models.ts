@@ -3,7 +3,8 @@
  * plus the cost ceiling that keeps agent-chosen models off the expensive tier.
  *
  * Defaults are user intent, so they are never ceiling-checked: the ceiling only
- * applies to a model an agent picked for itself. Set them with /subagent-model.
+ * applies to a model an agent picked for itself. Set the defaults with
+ * /subagent-model and the ceiling with /subagent-cost.
  */
 
 import { randomUUID } from "node:crypto";
@@ -37,12 +38,21 @@ export interface ClaudeDefaults {
   readonly effort: Effort;
 }
 
+/**
+ * Output-price ceiling in USD per million tokens, inclusive. Disabled by
+ * default; set a local value with /subagent-cost, or override per launch with
+ * PI_SUBAGENT_COST_CEILING.
+ */
+export const DEFAULT_COST_CEILING = null;
+
 export interface SubagentModels {
+  readonly costCeiling: number | null;
   readonly pi: PiDefaults;
   readonly claude: ClaudeDefaults;
 }
 
 export const DEFAULT_SUBAGENT_MODELS: SubagentModels = {
+  costCeiling: DEFAULT_COST_CEILING,
   pi: { provider: "deepseek", model: "deepseek-v4-pro", effort: "high" },
   claude: { model: "sonnet", effort: "high" },
 };
@@ -67,14 +77,6 @@ export const SUBAGENT_MODELS_PATH = join(
   sharedDirectory,
   "subagent-models.json",
 );
-
-/**
- * Output-price ceiling in USD per million tokens, inclusive. Set at sonnet-5's
- * exact price so haiku-4.5 ($5) and sonnet-5 ($10) are selectable while the
- * $15-and-up tier (kimi-k3, gpt-5.6-terra, opus-4.8, gpt-5.6-sol, fable-5) is
- * not. Override with PI_SUBAGENT_COST_CEILING=<number>, or "off" to disable.
- */
-export const DEFAULT_COST_CEILING = 10;
 
 export interface ModelCost {
   readonly output: number;
@@ -127,8 +129,9 @@ export function affordableModels<T extends ModelLike>(
   models: readonly T[],
   cwd: string,
 ) {
+  const ceiling = costCeiling();
   return curatedModels(models, cwd).filter(
-    (model) => !exceedsCostCeiling(model.cost),
+    (model) => !exceeds(ceiling, model.cost),
   );
 }
 
@@ -140,6 +143,14 @@ const isEffort = (value: unknown): value is Effort =>
 
 const nonEmpty = (value: unknown) =>
   typeof value === "string" && value.trim() ? value.trim() : undefined;
+
+function parseCostCeiling(value: unknown): number | null {
+  if (value === null) return null;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  return DEFAULT_COST_CEILING;
+}
 
 function parsePi(value: unknown): PiDefaults {
   if (!isRecord(value)) return DEFAULT_SUBAGENT_MODELS.pi;
@@ -158,10 +169,14 @@ function parseClaude(value: unknown): ClaudeDefaults {
   return { model, effort: value.effort };
 }
 
-/** Each harness falls back independently, so one bad half keeps the other. */
+/** Each field falls back independently, so one bad value keeps the rest. */
 export function parseSubagentModels(value: unknown): SubagentModels {
   if (!isRecord(value)) return DEFAULT_SUBAGENT_MODELS;
-  return { pi: parsePi(value.pi), claude: parseClaude(value.claude) };
+  return {
+    costCeiling: parseCostCeiling(value.costCeiling),
+    pi: parsePi(value.pi),
+    claude: parseClaude(value.claude),
+  };
 }
 
 export function loadSubagentModels(): SubagentModels {
@@ -186,19 +201,23 @@ export async function saveSubagentModels(config: SubagentModels) {
   }
 }
 
-/** Null when the ceiling is disabled. */
+/** Null when the ceiling is disabled. Env is a per-launch override of the file. */
 export function costCeiling(): number | null {
   const override = process.env.PI_SUBAGENT_COST_CEILING?.trim();
-  if (!override) return DEFAULT_COST_CEILING;
-  if (override.toLowerCase() === "off") return null;
-  const parsed = Number.parseFloat(override);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_COST_CEILING;
+  if (override) {
+    if (override.toLowerCase() === "off") return null;
+    const parsed = Number.parseFloat(override);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return loadSubagentModels().costCeiling;
+}
+
+function exceeds(ceiling: number | null, cost: ModelCost | undefined) {
+  return ceiling !== null && !!cost && cost.output > ceiling;
 }
 
 export function exceedsCostCeiling(cost: ModelCost | undefined) {
-  const ceiling = costCeiling();
-  if (ceiling === null || !cost) return false;
-  return cost.output > ceiling;
+  return exceeds(costCeiling(), cost);
 }
 
 /** Actionable rejection naming the ceiling and what is still available. */
@@ -214,6 +233,6 @@ export function costCeilingMessage(options: {
     `$${ceiling}/Mtok subagent ceiling. ` +
     (affordable ? `Try one of: ${affordable}. ` : "") +
     `Omit "model" to use the configured default, or ask the user to run ` +
-    `/subagent-model if this task really needs a pricier model.`
+    `/subagent-cost if this task really needs a pricier model.`
   );
 }
