@@ -101,7 +101,9 @@ export interface WorkflowRuntime {
 // process-global, so the registration survives module duplication.
 const RUNTIME_KEY = Symbol.for("pi.shared.workflow-runtime");
 
-type RuntimeGlobal = typeof globalThis & { [key: symbol]: WorkflowRuntime | undefined };
+type RuntimeGlobal = typeof globalThis & {
+  [key: symbol]: WorkflowRuntime | undefined;
+};
 
 const g = globalThis as RuntimeGlobal;
 
