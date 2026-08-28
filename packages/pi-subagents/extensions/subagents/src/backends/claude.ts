@@ -493,10 +493,13 @@ const makeClaudeSession = (
       // result.usage is a whole-run aggregate, not occupancy (see
       // contextOccupancyTokens); only the capacity is trustworthy here. The
       // occupancy itself was already emitted by the last assistant message.
+      // total_cost_usd is the CLI's session running total, so it replaces the
+      // snapshot's cost rather than accumulating.
       const contextWindow = resultContextWindow(result);
       emit({
         _tag: "UsageChanged",
         contextWindow: contextWindow ?? state.meta.contextWindow,
+        costUsd: result.total_cost_usd,
       });
       if (
         contextWindow !== undefined &&

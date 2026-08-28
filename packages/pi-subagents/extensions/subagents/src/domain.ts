@@ -36,7 +36,7 @@ export const REASONING_EFFORTS = [
 ] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
-export type SubagentStatus = "running" | "done" | "error";
+export type SubagentStatus = "running" | "done" | "error" | "cancelled";
 
 /** Parent-session context resolved by the tool layer and passed opaquely. */
 export interface ParentContext {
@@ -190,12 +190,22 @@ export type SubagentEvent =
       readonly _tag: "UsageChanged";
       readonly tokens?: number;
       readonly contextWindow?: number;
+      /** Backend-reported cumulative spend for this subagent, USD. */
+      readonly costUsd?: number;
     }
   | { readonly _tag: "MetaChanged"; readonly meta: Partial<SubagentMeta> }
   /** Non-fatal diagnostics. Fatal failures arrive as a RunSettled outcome. */
   | { readonly _tag: "BackendError"; readonly message: string };
 
 // --- Snapshot ---------------------------------------------------------------
+
+/** Usage the backends report for one subagent; every field optional while unknown. */
+export interface SubagentUsage {
+  readonly tokens?: number;
+  readonly contextWindow?: number;
+  /** Cumulative spend for this subagent, USD. */
+  readonly costUsd?: number;
+}
 
 /**
  * The manager folds `SubagentEvent`s into one snapshot per subagent. This is
@@ -213,7 +223,7 @@ export interface SubagentSnapshot {
   readonly settledAt?: number;
   readonly errorText?: string;
   readonly meta: SubagentMeta;
-  readonly usage: { readonly tokens?: number; readonly contextWindow?: number };
+  readonly usage: SubagentUsage;
   readonly transcript: ReadonlyArray<TranscriptItem>;
   /** Streaming assistant buffers, cleared when the finalized message lands. */
   readonly liveAssistant?: { readonly text: string; readonly thinking: string };

@@ -452,6 +452,8 @@ const makePiSession = (
       /** One terminal event per run: lifecycle, prompt-rejection, and abort
        * fallbacks can all race to settle; the first wins. */
       settled: false,
+      /** Cumulative spend across the child's whole lifetime (idle restarts included). */
+      costUsd: 0,
     };
 
     const events = yield* Queue.make<SubagentEvent, Cause.Done>();
@@ -496,6 +498,7 @@ const makePiSession = (
         _tag: "UsageChanged",
         tokens: usage?.tokens ?? undefined,
         contextWindow: activeModel()?.contextWindow ?? usage?.contextWindow,
+        costUsd: state.costUsd,
       });
     };
 
@@ -565,10 +568,10 @@ const makePiSession = (
             const text = userText(event.message as Message);
             if (text.trim()) emit({ _tag: "UserMessage", text });
           } else if (role === "assistant") {
-            addChildCost(
-              "subagents",
-              (event.message as AssistantMessage).usage?.cost?.total ?? 0,
-            );
+            const messageCost =
+              (event.message as AssistantMessage).usage?.cost?.total ?? 0;
+            state.costUsd += messageCost;
+            addChildCost("subagents", messageCost);
             emit({
               _tag: "AssistantMessage",
               parts: assistantParts(event.message as AssistantMessage),

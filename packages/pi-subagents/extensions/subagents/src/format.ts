@@ -46,3 +46,9 @@ export function formatContextUtilization(usage: ContextUtilization) {
   const percent = contextPercent(usage);
   return `${percent === undefined ? "?" : percent}%/${formatCompactTokens(capacity)}`;
 }
+
+/** `$X.XXX`, matching the footer's cost formatting; omitted while unknown/empty. */
+export function formatCost(usd: number | null | undefined) {
+  if (typeof usd !== "number" || !Number.isFinite(usd) || usd <= 0) return "";
+  return `$${usd.toFixed(3)}`;
+}
