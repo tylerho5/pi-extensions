@@ -10,67 +10,59 @@ Prompts for human confirmation before risky git writes, PR publishing, and recur
 
 # Guard
 
-Intercepts dangerous shell commands before the `bash` tool executes and asks a human to confirm. Three independent guards trip on git write operations, `gh pr` publishing, and recursive `rm`; every match pauses on a confirmation modal, and a declined prompt blocks the tool call with `Blocked by guard: <reason>`. Toggles per guard via `/guard`, persisted in `settings.json`. The prompt routing also spans subagents: a headless child session's guard prompt bubbles up to the interactive session's modal so a human still decides.
+Blocks dangerous shell commands before the `bash` tool executes them and asks a human to confirm. Three matchers cover git write operations, `gh pr` publishing, and recursive `rm`. A declined prompt blocks the call with `Blocked by guard: <reason>`, and a prompt from a headless subagent still reaches a human through the interactive session's modal.
 
-## Key concepts
+## Claude Code lineage
 
-- **Fires on the `tool_call` event, bash only.** `index.ts` subscribes to `tool_call`, narrows with `isToolCallEventType("bash", event)`, and runs `evaluateBashGate` over the command string. Return `undefined` → the call proceeds; return `{ block: true, reason }` → pi blocks it before execution.
-- **Three matchers, one contract.** Every guard is a `Guard { id, label, match(command): string | null }` (`types.ts`); `match` returns `null` when the command is untouched, otherwise the reason string shown in the prompt. The matchers are regex-based, **unanchored** — they fire anywhere in a compound command (`git add -A; git push` still trips) and tolerate intervening global flags (`git -C /repo commit -m x`):
-  - **git** (`git.ts`): `commit`, `push`, `reset`, `merge` subcommands. Regex allows global flags (`-C path`, `--git-dir=x`, `-c k=v`) between `git` and the subcommand. Read-only commands (`status`, `log`, `diff`, `show`, `remote -v`) pass. Reasons: "committing", "pushing", "resetting", "merging".
-  - **pr** (`pr.ts`): `gh pr create` always flags ("creating a PR"); `gh pr edit` flags only when a body/title flag is present — `--body` (covers `--body-file`), `--title`, or short `-b`/`-t`/`-F` ("editing a PR description"). `gh pr view/list/checkout/merge/diff` and `gh pr edit` with only `--add-label`/`--add-reviewer` pass.
-  - **rm** (`rm.ts`): `rm` at a command boundary (optional `sudo ` prefix or absolute path like `/bin/rm`) AND a recursive flag (any bundled short flag containing `r`/`R`, e.g. `-rf`/`-fr`/`-Rf`/`-rfv`, or `--recursive`). Non-recursive `rm` and substring lookalikes (`rmdir`, `trm`, `confirm -r`) pass. Notably also flags `git rm -r`.
-- **Prompt routing is three-way** (`routePrompt` in `decision.ts`): `hasUI` → ask locally via `ctx.ui.confirm`; no UI but a parent UI registered → ask the parent (see bridge); neither → headless, decided by the configured fallback (default **deny**). The prompt title is `Guard` locally and `Guard — subagent command` when routed to the parent; body is `Confirm before <reasons joined with " and ">:\n\n  <command>`.
-- **Subagent bridging** (`bridge.ts`). At the interactive session's `session_start`, `ctx.ui` is captured into a module-level `parentUi`. Headless child sessions (subagents, workflow agents — all `ctx.hasUI === false`) route their guard prompts through `confirmOnParent`, which serializes on a promise queue so concurrent subagents never collide on the modal; a rejected confirm doesn't stall the queue. No parent UI → resolves `false` (blocks).
-- **Settings live in the shared `settings.json`**, not a guard-specific file: `globalSettingsPath()` = `join(getAgentDir(), "settings.json")`, under the `guard` key. `writeGuardSetting` patches only that key and preserves unrelated keys. `PI_DISABLE_GUARDS` env var (truthy: `1`/`true`/`yes`/`on`) force-disables all three toggles regardless of the file. `parseGuardSettings` is tolerant — wrong-typed fields fall back to defaults.
+The matchers port Claude Code's `git-guard.sh`, `pr-guard.sh`, and `rm-guard.sh`, three shell scripts that toggle a `PreToolUse` hook and match the Bash command with `grep -qE` EREs, emitting `permissionDecision: "ask"` to force a prompt. `src/git.ts`, `src/pr.ts`, and `src/rm.ts` carry those expressions as JS regexes, with the `tool_call` gate standing in for the hook and `/guard` for the scripts' `jq` settings toggle. The scripts, the source comments, and the design plan record no Claude Code version, so the release the port came from is not recorded.
+
+## How it works
+
+The extension subscribes to `tool_call` and narrows to bash with `isToolCallEventType("bash", event)`. It runs `evaluateBashGate` over the command string. The gate returns `undefined` to let the call proceed, or `{ block: true, reason }` to stop it before execution.
+
+Every guard has the shape `Guard { id, label, match(command): string | null }`. `match` returns `null` when the command is untouched, and the reason string otherwise. The matchers are unanchored, so they fire anywhere in a compound command.
+
+- git (`git.ts`): the `commit`, `push`, `reset`, and `merge` subcommands. Flags such as `-C path`, `--git-dir=x`, and `-c k=v` may sit between `git` and the subcommand. Reasons: `committing`, `pushing`, `resetting`, `merging`. Read-only commands (`status`, `log`, `diff`, `show`, `remote -v`) pass.
+- pr (`pr.ts`): `gh pr create` always matches, with reason `creating a PR`. `gh pr edit` matches only with a body or title flag (`--body`, which also covers `--body-file`, `--title`, or the short `-b`, `-t`, `-F`), with reason `editing a PR description`. `gh pr view`, `list`, `checkout`, `merge`, `diff`, and label-only or reviewer-only edits pass.
+- rm (`rm.ts`): an `rm` invocation at a command boundary, optionally with a `sudo ` prefix or an absolute path such as `/bin/rm`, plus a recursive flag. The flag may be bundled short (`-rf`, `-fr`, `-Rf`, `-rfv`), short and split (`-v -r`), or `--recursive`. Reason: `a recursive delete (rm -r)`. Non-recursive removes and substring lookalikes (`rmdir`, `trm`, `confirm -r`) pass. `git rm -r` matches.
+
+`routePrompt` picks one of three routes. A session with UI prompts locally. A session without UI but with a registered parent UI prompts the parent. With no UI anywhere, the session is headless and the configured fallback decides.
+
+The bridge captures the interactive session's `ctx.ui` at `session_start`. Headless child sessions route through `confirmOnParent`, which serializes on a promise queue so concurrent subagents do not collide on the modal. A rejected confirm does not stall the queue. Without a parent UI, the prompt resolves `false`.
+
+Settings live under the `guard` key of the shared `settings.json`, not a guard-specific file. `writeGuardSetting` patches only that key and preserves unrelated keys. `parseGuardSettings` is tolerant, so a wrong-typed field falls back to its default. `PI_DISABLE_GUARDS` (truthy values `1`, `true`, `yes`, `on`) force-disables all three guards regardless of the file.
 
 ## API
 
-No tools (`registerTool`) and no shortcuts are registered. Surface:
+No tools and no shortcuts are registered. `pi.registerCommand("guard", ...)` carries the description "Toggle git/pr/rm command guards (on|off|status)" and splits its arguments into `[id] [action]`.
 
-### Command: `/guard`
-
-`pi.registerCommand("guard", ...)` — toggle or inspect the guards. Args are whitespace-split into `[id] [action]`.
-
-| Args | Behavior |
+| Args | Result |
 |---|---|
-| *(none)* or `status` | Notify overall status line: `guards — git: on, pr: on, rm: on (headless fallback: deny)` |
-| `<id>` or `<id> status` | Notify one guard's state, e.g. `git guard is on` |
-| `<id> on` / `<id> off` | Write the toggle to `settings.json` and notify `git guard ON` / `git guard OFF` |
-| unknown `<id>` | Warning: `Unknown guard "<id>". Use git, pr, or rm.` |
-| bad action | Warning: `Usage: /guard <id> on|off|status` |
+| none, or `status` | `guards — git: on, pr: on, rm: on (headless fallback: deny)` |
+| `<id>`, or `<id> status` | `git guard is on` |
+| `<id> on` / `<id> off` | writes the toggle and reports `git guard ON` / `git guard OFF` |
+| unknown `<id>` | warning `Unknown guard "<id>". Use git, pr, or rm.` |
+| bad action | warning `Usage: /guard <id> on\|off\|status` |
 
-`id` must be one of the `GUARD_IDS = ["git", "pr", "rm"]` (`GuardId` type). `headlessFallback` is only editable by hand-editing `settings.json`.
+Two handlers are registered. `session_start` calls `setParentUi` with the session's `ctx.ui` when `ctx.hasUI` is true. `tool_call` runs for bash only and calls `evaluateBashGate(event.input.command, settings, { hasUI, hasParent }, { confirmLocal, confirmParent })`.
 
-### Events
+The prompt title is `Guard` locally and `Guard — subagent command` when routed to the parent. The body is `Confirm before <reasons joined with " and ">:\n\n  <command>`, and the block result joins the reasons with `, `. `id` is one of `GUARD_IDS = ["git", "pr", "rm"]`, and only `headlessFallback` requires hand-editing `settings.json`.
 
-| Event | Handler |
-|---|---|
-| `session_start` | If `ctx.hasUI`, captures `ctx.ui` via `setParentUi` so headless child sessions can route guard prompts to this session's modal. |
-| `tool_call` | For `bash` events only (`isToolCallEventType("bash", event)`): loads settings, runs `evaluateBashGate(event.input.command, settings, { hasUI, hasParent }, { confirmLocal, confirmParent })`. Returns `{ block: true, reason: "Blocked by guard: <reasons>" }` when declined/unapproved, `undefined` (pass) otherwise. |
+`~/.pi/agent/settings.json` holds `guard`: `{ "git": boolean, "pr": boolean, "rm": boolean, "headlessFallback": "deny" | "allow" }`. Defaults are `true` for all three and `headlessFallback: "deny"`. Set `headlessFallback` to `"allow"` to let a fully headless session run guarded commands without confirmation.
 
-### Config
+Only top-level `index.ts` is auto-loaded, and nothing else imports the extension. Its default export is `(pi: ExtensionAPI) => void`. `GUARD_IDS`, `isGuardId`, and `statusLine` stay module-private.
 
-- `~/.pi/agent/settings.json` → `guard` key: `{ "git": boolean, "pr": boolean, "rm": boolean, "headlessFallback": "deny" | "allow" }`. Defaults: all `true`, `headlessFallback: "deny"`. Hand-edit `headlessFallback` to `"allow"` to let fully headless sessions (no UI anywhere) run guarded commands without confirmation.
-- Env var `PI_DISABLE_GUARDS` (truthy) — overrides the file, turns all three toggles off.
-
-### Module exports (internal surface)
-
-Only `index.ts` is auto-loaded (top-level `*.ts`). All modules below are imported by it; nothing imports the guard extension from elsewhere.
-
-- **index.ts** — default export `(pi: ExtensionAPI) => void` (the only export). `GUARD_IDS`, `isGuardId`, and `statusLine` are module-private helpers, not exported.
-- **src/types.ts** — `GuardId = "git" | "pr" | "rm"`; `interface Guard { id, label, match(command): string | null }`.
-- **src/registry.ts** — `GUARDS: readonly Guard[]` (git, pr, rm — order determines reason order).
-- **src/git.ts / src/pr.ts / src/rm.ts** — default-exported `Guard` implementations (matcher regexes + reasons, see Key concepts).
-- **src/decision.ts** — `guardReasons(command, settings): string[]`; `routePrompt(ctx: PromptContext): Route` (`Route = { route: "prompt-local" } | { route: "prompt-parent" } | { route: "headless"; allow: boolean }`); `evaluateBashGate(command, settings, env: GateEnv, hooks: GateHooks): Promise<GateResult>` where `GateResult = { block: true; reason: string } | undefined`; types `GateHooks { confirmLocal, confirmParent }`, `PromptContext { hasUI, hasParent, fallback }`.
-- **src/bridge.ts** — `setParentUi(ui: ConfirmUi | undefined)`, `hasParentUi(): boolean`, `confirmOnParent(title, body): Promise<boolean>` (serialized; `false` with no parent UI); `interface ConfirmUi { confirm(title, body): Promise<boolean> }`.
-- **src/settings.ts** — `GuardSettings`, `HeadlessFallback`, `DEFAULT_GUARD_SETTINGS`, `parseGuardSettings(value): GuardSettings`, `loadGuardSettings(path, env = process.env)`, `writeGuardSetting(path, patch: Partial<GuardSettings>)`, `globalSettingsPath()`.
+- `src/types.ts`: `GuardId = "git" | "pr" | "rm"`, `Guard`.
+- `src/registry.ts`: `GUARDS: readonly Guard[]` in the order git, pr, rm, which sets reason order.
+- `src/git.ts`, `src/pr.ts`, `src/rm.ts`: default-exported `Guard` implementations.
+- `src/decision.ts`: `guardReasons`, `routePrompt`, `evaluateBashGate`, and the types `Route`, `PromptContext`, `GateHooks`, `GateEnv`, `GateResult`.
+- `src/bridge.ts`: `setParentUi`, `hasParentUi`, `confirmOnParent`, `ConfirmUi`.
+- `src/settings.ts`: `GuardSettings`, `HeadlessFallback`, `DEFAULT_GUARD_SETTINGS`, `parseGuardSettings`, `loadGuardSettings`, `writeGuardSetting`, `globalSettingsPath`.
 
 ## Examples
 
-1. **Agent proposes a force push.** The agent calls `bash` with `git push --force origin main`. The git guard matches (`pushing`), a modal appears: `Guard — Confirm before pushing:\n\n  git push --force origin main`. User declines → the tool result reads `Blocked by guard: pushing` and the agent must not proceed without approval.
+A force push. The agent calls `bash` with `git push --force origin main`. The git guard matches with reason `pushing`. The modal asks `Guard — Confirm before pushing:\n\n  git push --force origin main`. A decline returns `Blocked by guard: pushing` and the agent must not proceed without approval.
 
-2. **Disable/enable per command.** `/guard git off` → `git guard OFF` (persisted to `settings.json`). `/guard status` → `guards — git: off, pr: on, rm: on (headless fallback: deny)`.
+Per-guard toggling and bypass. `/guard git off` reports `git guard OFF` and persists to `settings.json`. `/guard status` then reports `guards — git: off, pr: on, rm: on (headless fallback: deny)`. `PI_DISABLE_GUARDS=1 pi ...` disables all three guards at load time and overrides the file.
 
-3. **Subagent tripping a guard.** A spawned subagent (headless, `hasUI: false`) runs `rm -rf build`. Its `tool_call` handler routes the prompt to the parent interactive session's modal, titled `Guard — subagent command`; the human's answer decides. If the parent session is gone (no `parentUi`), the headless fallback applies — `deny` blocks, `allow` passes.
-
-4. **Scripted/CI bypass.** `PI_DISABLE_GUARDS=1 pi …` (or exporting it) force-disables all three guards at load time, overriding `settings.json`.
+Subagent prompt routing. A subagent with `hasUI: false` runs `rm -rf build`. Its handler routes the prompt to the parent modal, titled `Guard — subagent command`. When no parent session exists, the headless fallback decides, where `deny` blocks and `allow` passes.

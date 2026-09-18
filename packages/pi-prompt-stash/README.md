@@ -10,50 +10,49 @@ Saves and restores the editor's draft text in a single slot via ctrl+s, Claude C
 
 # Prompt Stash
 
-Claude Code-style prompt stash: `ctrl+shift+s` (or `/stash`) saves the editor's current draft to a single in-memory slot and clears the editor; pressing it again with an empty editor restores the draft verbatim. A footer status (`prompt-stash`) shows a one-line preview while a stash exists. Single file (`index.ts`, 84 lines) plus its test.
+Prompt Stash saves the editor draft to a single in-memory slot and clears the editor. Pressing the shortcut again with an empty editor puts the draft back. A footer status line shows a preview while the slot holds a draft.
 
-## Key concepts
+## Claude Code lineage
 
-- **Single slot, overwrite semantics** — exactly Claude Code's `chat:stash`. Editor has text → stash it *raw and untrimmed* (leading/trailing whitespace and newlines preserved), clear the editor. Editor empty or whitespace-only + stash exists → restore it and clear the slot. Editor empty + no stash → no-op. A second stash overwrites the first: there is no stack.
-- **Module-level state, not session state.** `stashed` is a module-level `string | undefined`, deliberately outside any session: the stash survives session rebinds (`/new`, `/resume`, `/fork`) within the process, mirroring CC's app-level React state. A full `/reload` re-imports the module and drops the stash — also like CC losing it on process restart.
-- **Key-repeat suppression.** A held `ctrl+shift+s` autorepeats (kitty CSI-u repeat events, or legacy raw bytes) and pi filters key releases but not repeats, so without a guard the shortcut would cycle stash → restore → stash while the key is held. `toggleStash` ignores toggles closer than `REPEAT_WINDOW_MS = 300` ms apart, and always updates `lastToggleAt` — even on a suppressed toggle — so a long hold stays suppressed until the key is released.
-- **Pure decision logic.** The handler is a thin wrapper over three exported pure functions (`decideStashAction`, `shouldToggle`, `stashPreview`) so all semantics are unit-testable without a UI.
-- **Text only.** pi's editor API exposes no pasted images; the stash holds exactly what `getEditorText()` returns.
-- **Feedback asymmetry.** Stash sets status `prompt-stash` → `stashed: <preview>` (clearing the editor is its own visible feedback, so no notification). Restore clears the status and fires `ctx.ui.notify("Draft restored", "info")`.
+The stash semantics come from Claude Code's `chat:stash` action: one slot that overwrites on a second stash, raw untrimmed text, a whitespace-only editor counting as empty, and a restore that clears the slot. Claude Code binds the action to `ctrl+s` in its chat context, so this extension binds `ctrl+shift+s` and leaves the `ctrl+s` builtins alone. No Claude Code version appears in the source, the commit messages, or the earlier docs, so the release the semantics came from is not recorded.
+
+## How it works
+
+`ctrl+shift+s` and `/stash` call the same handler and do the same thing. The handler reads the editor text and the slot, then picks one of three actions.
+
+- Editor has text: store the text raw and untrimmed and clear the editor. The text keeps its leading and trailing whitespace and newlines. A second stash overwrites the first, so the slot holds one draft and never stacks.
+- Editor is empty or whitespace-only and the slot has a draft: restore the draft and empty the slot.
+- Editor is empty and the slot is empty: do nothing.
+
+The slot is a module-level `string | undefined`, outside any session. It survives session rebinds such as `/new`, `/resume` and `/fork` within one process. A full `/reload` re-imports the module and drops the draft. The slot holds text only, because pi's editor API exposes no pasted images.
+
+A held key autorepeats, and pi filters key releases but not repeats. Without a guard the held key would cycle stash and restore. The handler ignores toggles closer than `REPEAT_WINDOW_MS = 300` milliseconds and writes the timestamp even on a suppressed toggle, so a long hold stays suppressed until the key is released.
+
+A stash calls `ctx.ui.setStatus("prompt-stash", "stashed: <preview>")` and sends no notification, because clearing the editor is visible feedback on its own. A restore calls `ctx.ui.setStatus("prompt-stash", undefined)` and `ctx.ui.notify("Draft restored", "info")`.
+
+The extension binds `ctrl+shift+s` because `ctrl+s` is pi's built-in `app.thinking.save`, plus the picker-scoped `app.models.save` and `app.session.toggleSort`. An extension shortcut on `ctrl+s` shadows the builtin and warns at load.
 
 ## API
 
-No tools (`registerTool`), no events (`pi.on`), no config files, no settings references. Two registrations plus three exported pure functions.
+No tools, no events, no config files, no settings. Two registrations plus three exported functions.
 
-### Shortcut: `ctrl+shift+s`
+The shortcut registration is `pi.registerShortcut("ctrl+shift+s", { description: "Stash the current prompt draft, or restore the stashed draft", handler: toggleStash })`. The handler type is `(ctx: ExtensionContext) => Promise<void> | void`, and it runs from the default editor's key handling.
 
-`pi.registerShortcut("ctrl+shift+s", { description: "Stash the current prompt draft, or restore the stashed draft", handler: toggleStash })`. Handler signature `(ctx: ExtensionContext) => Promise<void> | void` (pi's declared type; `toggleStash` is `async`); fires from the default editor's key handling (editor-scoped). `ctrl+s` is pi's built-in `app.thinking.save` (plus picker-scoped `app.models.save` and `app.session.toggleSort`), so the extension binds `ctrl+shift+s` — an extension shortcut on `ctrl+s` shadows the builtin and warns at load.
+The command registration is `pi.registerCommand("stash", { description: "Stash the current prompt draft, or restore the stashed draft (same as ctrl+shift+s)", handler: async (_args, ctx) => toggleStash(ctx) })`. It ignores arguments and behaves the same as the shortcut.
 
-### Command: `/stash`
+The handler uses four `ctx.ui` methods plus a headless guard:
 
-`pi.registerCommand("stash", { description: "Stash the current prompt draft, or restore the stashed draft (same as ctrl+shift+s)", handler: async (_args, ctx) => toggleStash(ctx) })`. Args ignored; identical behavior to the shortcut. Useful when `ctrl+s` is captured by a picker-scoped builtin.
+- `getEditorText(): string` reads the current draft.
+- `setEditorText(text)` clears the editor on a stash and fills it on a restore.
+- `setStatus("prompt-stash", string | undefined)` sets the footer status. Any footer that renders status keys shows it, for example [expanded-footer.md](expanded-footer.md).
+- `notify("Draft restored", "info")` reports a restore.
+- `if (!ctx.hasUI) return;` keeps headless sessions from toggling.
 
-### UI contract used (via `ctx.ui`)
-
-- `getEditorText(): string` — read the current draft.
-- `setEditorText(text)` — clear on stash, fill on restore.
-- `setStatus("prompt-stash", string | undefined)` — footer status line while a stash exists (any footer-rendering extension, e.g. the CC-style footer, shows it on the status line).
-- `notify("Draft restored", "info")` — restore feedback.
-- Guard: `if (!ctx.hasUI) return;` — headless sessions never toggle.
-
-### Exported pure functions
-
-| Export | Signature | Behavior |
-|---|---|---|
-| `shouldToggle` | `(now: number, lastToggleAtMs: number) => boolean` | `now - lastToggleAtMs >= REPEAT_WINDOW_MS` (300). |
-| `decideStashAction` | `(editorText: string, stashedText: string \| undefined) => { action: "stash", text: string } \| { action: "restore", text: string } \| { action: "noop" }` | Trim-based decision; stash text is the raw untrimmed editor text. |
-| `stashPreview` | `(text: string, max = 40) => string` | Squashes whitespace runs to single spaces, truncates to `max` chars ending with `…`. |
-
-Default export: `(pi: ExtensionAPI) => void` — registers the shortcut and command. Importing `./index.ts` (as the test does) is side-effect-free: the default export is defined but never invoked at import time.
+The extension exports three pure functions for its tests. `shouldToggle(now, lastToggleAtMs)` returns true when `now - lastToggleAtMs >= 300`. `decideStashAction(editorText, stashedText)` returns `{ action: "stash", text }`, `{ action: "restore", text }` or `{ action: "noop" }`, and the stash text is the raw editor text. `stashPreview(text, max = 40)` squashes whitespace runs into single spaces, trims the result and truncates to `max` characters ending in `…`. The default export has type `(pi: ExtensionAPI) => void`, and importing `./index.ts` has no side effects.
 
 ## Examples
 
-1. **Stash a half-written prompt.** Mid-draft, the user wants to run something else: `ctrl+shift+s` saves the draft (raw, untrimmed), clears the editor, and the footer shows `prompt-stash: stashed: <first ~40 chars, whitespace-squashed>…`. Later, with an empty editor, `ctrl+shift+s` restores it byte-for-byte and shows a "Draft restored" notification.
-2. **`/stash` as the explicit form.** Same behavior, no key binding — for discoverability, or as the fallback when `ctrl+s` is claimed by a picker-scoped builtin while a selector is open.
-3. **Overwrite, not stack.** Draft A is stashed; the user types draft B and hits `ctrl+shift+s` again — A is gone, B occupies the single slot. Restore yields B.
-4. **No-op cases.** Empty (or whitespace-only) editor with no stash: `ctrl+shift+s` does nothing — no status change, no notification. Whitespace-only editor text *with* a stash counts as "empty" and restores.
+1. Stash a half-written prompt. Mid-draft, `ctrl+shift+s` clears the editor and the footer shows `prompt-stash: stashed: <first 40 characters, whitespace squashed>…`. With an empty editor, `ctrl+shift+s` restores the draft byte for byte and shows the `Draft restored` notification.
+2. Run `/stash` instead. The command does the same work without a key binding, which helps in RPC and other non-TUI contexts.
+3. Overwrite the slot. Stash draft A, type draft B and stash again. Draft A is gone and a restore yields draft B.
+4. Do nothing. With an empty editor and an empty slot, `ctrl+shift+s` changes no status and sends no notification. A whitespace-only editor counts as empty and restores when the slot has a draft.

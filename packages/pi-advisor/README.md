@@ -10,50 +10,65 @@ A stronger reviewer model the main agent can consult mid-turn for strategic guid
 
 # Advisor
 
-Claude Code's advisor tool, ported to pi as a client-side feature: a stronger reviewer model the main agent consults mid-turn. The advisor sees the whole conversation (redacted transcript), returns strategic guidance, and is configured independently of the main agent's model via `~/.pi/agent/advisor.json` or `/advisor`.
+Ports Claude Code 2.1.227's advisor tool to pi. The main agent calls an `advisor` tool to consult a stronger reviewer model mid-turn, and the advisor returns strategic guidance on the work so far. The advisor runs on a model configured independently of the main agent, through `~/.pi/agent/advisor.json` or `/advisor`.
 
-## Key concepts
+## Claude Code lineage
 
-- **Client-side port, because pi is multi-provider.** Claude Code implements the advisor server-side (Anthropic's `advisor_20260301` beta tool); pi cannot. This extension instead serializes the current session to a plain-text transcript and makes a one-shot completion against the configured advisor model.
-- **Primary thread only.** Only the primary session gets the tool — subagent sessions spawn without extension custom tools, mirroring CC's "only the primary thread consults it" rule.
-- **Enabled ⇄ tool registered.** The tool (and its `promptSnippet`/`promptGuidelines`) is only registered while the advisor is enabled, so the "when to call advisor" prompting stays out of the system prompt while disabled. `syncAdvisorTool(enabled)` adds/removes `advisor` from the active tool set; since pi has no unregister API, registration is one-shot and the settings gate the calls. `session_start` re-checks settings because a tool registered earlier in the process stays in the registry for sessions created later.
-- **Plain-text transcript, not raw LLM messages.** Cross-provider forwarding of raw messages carries provider-specific block types (thinking signatures, `tool_use` pairs) that a different provider's API rejects; text is universally safe. The serializer redacts secrets, caps tool arguments (2 KB) and results (8 KB), and middle-elides at 200 KB.
-- **One-shot completion, no memory.** The advisor model sees only the forwarded transcript — no session state, no tools. Call path: `modelRegistry.find()` → `getApiKeyAndHeaders()` → `completeSimple()` (same as the memory/summaries extensions), with the configured thinking effort clamped via `getSupportedThinkingLevels` and a 10-minute timeout / 1 retry.
-- **Independent config.** `advisor.json` lives at the agent dir (`~/.pi/agent/advisor.json`), not inside the extension. Every field falls back independently (per-field defaults) so a corrupt or half-edited file can never break the main session; writes are atomic (temp file + rename).
-- **Prompt lineage.** The tool description/snippet/guidelines are ported from Claude Code 2.1.227's "# Advisor Tool" system-prompt block; the advisor's own system prompt (`ADVISOR_SYSTEM_PROMPT`) is original — CC's advisor prompt is server-side and unrecoverable.
+Claude Code implements the advisor server-side, as Anthropic's `advisor_20260301` beta tool. pi is multi-provider and cannot call that tool, so this extension is a client-side port. It serializes the session into a plain-text transcript and makes a one-shot completion against a model from the local registry.
+
+The tool description, prompt snippet and guidelines come from Claude Code 2.1.227's "# Advisor Tool" system-prompt block. Claude Code keeps its advisor prompt server-side, so `ADVISOR_SYSTEM_PROMPT` here is original. The rule that only the primary thread consults the advisor also comes from Claude Code.
+
+Version 2.1.227 is the release the current port text was pulled from. The extension has one feature commit, `9efa7ea feat(advisor): port CC advisor` (2026-08-12), and no later commit changed the prompt constants.
+
+## How it works
+
+The forwarded transcript is plain text, not a copy of the provider messages. Raw message forwarding across providers carries block types (thinking signatures, `tool_use` pairs) that another provider's API rejects. `serializeAdvisorTranscript` renders each session entry as a labelled block instead, redacts secrets, caps tool arguments and results, and middle-elides the whole transcript when it exceeds 200 KB.
+
+Only the primary session receives the tool. Subagent sessions spawn without extension custom tools, which matches Claude Code's rule that only the primary thread consults the advisor.
+
+Registration follows the enabled flag. The tool and its `promptSnippet` and `promptGuidelines` are registered only while the advisor is enabled, so the "when to call advisor" rules leave the system prompt when the advisor is off. pi has no unregister API, so the extension registers the tool once and adds or removes it from the active tool set with `setActiveTools`. A tool registered earlier in the process stays in the registry for sessions created later, so the `session_start` handler re-checks the settings.
+
+A consultation resolves the configured model through the model registry, pulls its credentials with `getApiKeyAndHeaders`, and calls `completeSimple` with `ADVISOR_SYSTEM_PROMPT` and the transcript wrapped in `<conversation>` tags. The configured effort is clamped to a level the model supports. The call allows 10 minutes and one retry. The advisor receives no tools and no session state.
+
+The config sits at `~/.pi/agent/advisor.json`, outside the extension directory, and every field falls back to a default on its own. A missing, corrupt or half-edited file therefore cannot break the main session. Writes go to a temp file and are renamed into place.
 
 ## API
 
 ### Tool
 
-`advisor` — consult the configured reviewer model. **Takes NO parameters** (`Type.Object({})`); the entire conversation is forwarded automatically. The description tells the agent when to call: before substantive work (after orientation), when it believes it's done (deliverable made durable first), when stuck, and before changing approach; at least once before committing to an approach and once before declaring done on multi-step tasks.
+`advisor` takes no parameters (`Type.Object({})`). The whole conversation is forwarded automatically. Its description carries the when-to-call rules: before substantive work and before committing to an approach, after the orientation reads the task requires, when stuck, when considering a change of approach, and before declaring done on a task longer than a few steps. The description also tells the agent to make a deliverable durable before a completion check, because the call takes time and a written file survives a session that ends during it.
 
-- **Execute** returns `{ content: [{ type: "text", text: <advice> }], details: { model: "<provider>/<model>", effort, durationMs, truncated } }`. When disabled it returns a message telling the agent to run `/advisor` instead of throwing.
-- **Failure modes** (thrown as `AdvisorError`, message goes back to the agent): disabled, model not in registry, no usable credentials (suggests `/login <provider>` or `/advisor`), transport/provider failure, `stopReason: "error" | "aborted"`. `stopReason: "length"` appends a truncation note and sets `truncated: true`.
-- **Custom rendering**: `renderCall` shows `advisor <provider/model>` (or `(disabled)`); `renderResult` shows a dim meta header (`model · effort · seconds`) plus the advice, with `[advice truncated]` in warning color when the output cap was hit.
+`execute` returns `{ content: [{ type: "text", text: <advice> }], details: { model, effort, durationMs, truncated } }`, where `model` is `"<provider>/<model>"` and `truncated` is true when the advisor reached its output cap. When the advisor is disabled, `execute` returns text telling the agent to run `/advisor` instead of throwing.
+
+`AdvisorError` carries every failure back to the agent as a tool error: disabled, model missing from the registry, no usable credentials (the message points to `/login <provider>` or `/advisor`), a transport or provider failure, and `stopReason: "error" | "aborted"`. A `stopReason: "length"` does not throw. It appends an output-cap note to the advice and sets `truncated`.
+
+`renderCall` shows `advisor <provider>/<model>`, or `advisor (disabled)`. `renderResult` shows a dim header of `model · effort · seconds` above the advice, and appends `[advice truncated]` in warning color when the cap was hit.
 
 ### Command
 
-`/advisor` — configure the advisor model, independent of the main agent's model rotation.
+`/advisor`, described as "Configure the advisor: a stronger model the agent can consult mid-turn", sets the advisor model.
 
-| Arg | Behavior |
+| Argument | Behavior |
 |---|---|
-| *(none)* | TUI: interactive picker (curated models, cheapest first, current one marked `· current`, plus a toggle row to turn on/off). Non-TUI: notify current status. |
-| `on` | Enable with current settings. |
-| `off` | Disable (removes the tool from the active set and the prompting from the system prompt). |
-| `status` | Show `enabled · <provider>/<model> · <effort>` or `disabled`; no write. |
-| `<provider>/<model>` | Resolve against the model registry; sets `enabled: true` with that model. In TUI, then asks for a thinking effort via `ThinkingSelectorComponent` (only levels the model supports). |
-| anything else | Warning: `"<arg>" is not an available model. Run /advisor with no arguments to pick one.` |
+| none | In the TUI, opens an interactive picker. Otherwise it notifies the current status. |
+| `on` | Saves `enabled: true` and syncs the tool. |
+| `off` | Saves `enabled: false`, removes the tool from the active set, and drops its prompting from the system prompt. |
+| `status` | Notifies `enabled · <provider>/<model> · <effort>` or `disabled`. Writes nothing. |
+| `<provider>/<model>` | Resolves the pair in the registry, saves it with `enabled: true`, and asks for a thinking effort in the TUI. |
+| a bare model id | Matches on model id when the argument has no `provider/` prefix. Exactly one registry match is required. |
+| anything else | Warns `"<arg>" is not an available model. Run /advisor with no arguments to pick one.` |
 
-`getArgumentCompletions` suggests `on`, `off`, `status`.
+The picker lists `curatedModels` cheapest first, labels each entry `provider/model · $<output price>/Mtok out`, marks the current model with `· current`, and appends a row that turns the advisor off or on. Picking a model then opens `ThinkingSelectorComponent` restricted to the levels that model supports. `getArgumentCompletions` suggests `on`, `off`, and `status`. A successful pick notifies `Advisor: <provider>/<model> · <effort>`.
+
+Every write goes through `saveAdvisorSettings`, and a failed save notifies `Could not save the advisor config.` and changes nothing.
 
 ### Events
 
-- `session_start` — re-runs `syncAdvisorTool(loadAdvisorSettings().enabled)` so the tool visibility matches the config for each new session (a tool registered earlier in the process stays in the registry for later sessions).
+`session_start` re-runs `syncAdvisorTool(loadAdvisorSettings().enabled)` so tool visibility and the system-prompt rules match the config in each new session.
 
 ### Config file
 
-`~/.pi/agent/advisor.json` (`ADVISOR_SETTINGS_PATH` = `join(getAgentDir(), "advisor.json")`):
+`ADVISOR_SETTINGS_PATH` is `join(getAgentDir(), "advisor.json")`, which resolves to `~/.pi/agent/advisor.json`. The file is per machine and gitignored.
 
 ```json
 {
@@ -65,18 +80,25 @@ Claude Code's advisor tool, ported to pi as a client-side feature: a stronger re
 }
 ```
 
-`DEFAULT_ADVISOR_SETTINGS`: `enabled: true`, `openrouter`/`anthropic/claude-opus-4.8` (CC pairs its advisor with Opus; mirrored on the openrouter half), `effort: "high"`, `maxTokens: 32_000`. `maxTokens` bounds total output (thinking + text) per call; values must be finite numbers ≥ 1000 or the default applies. `effort` must be one of the shared `EFFORTS` (`off | minimal | low | medium | high | xhigh | max`).
+`DEFAULT_ADVISOR_SETTINGS` is `enabled: true`, `openrouter`/`anthropic/claude-opus-4.8`, `effort: "high"`, and `maxTokens: 32_000`. Claude Code pairs its advisor with Opus, and the default mirrors that on the OpenRouter side. `maxTokens` bounds total output per call, thinking plus text. It must be a finite number of at least 1000, or the default applies. `effort` must be one of the shared `EFFORTS`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 
-### Module exports (src/)
+`parseAdvisorSettings(value: unknown)` falls back per field, and a non-object value returns the full defaults. `loadAdvisorSettings()` returns the defaults when the file is missing or unreadable. `saveAdvisorSettings(settings)` writes to `<path>.<pid>.<uuid>.tmp` and renames that file over the target.
 
-- **`src/settings.ts`** — `AdvisorSettings` (interface: `enabled`, `provider`, `model`, `effort`, `maxTokens`), `DEFAULT_ADVISOR_SETTINGS`, `ADVISOR_SETTINGS_PATH`, `modelKey(settings)` (→ `"<provider>/<model>"`), `parseAdvisorSettings(value: unknown)`, `loadAdvisorSettings()`, `saveAdvisorSettings(settings)` (atomic: temp file + rename).
-- **`src/consult.ts`** — `consultAdvisor({ deps, settings, transcript, signal })` → `ConsultResult { advice, durationMs, truncated }`; `makeConsultDeps(modelRegistry)` wires `findModel`/`getAuth`/`complete` to the live registry; `ConsultDeps` interface (injectable for tests); `AdvisorError`; constants `ADVISOR_TIMEOUT_MS` (10 min), `ADVISOR_MAX_RETRIES` (1).
-- **`src/transcript.ts`** — `serializeAdvisorTranscript(entries, maxBytes = TRANSCRIPT_MAX_BYTES)` turns `SessionEntry[]` into a `USER / ASSISTANT / TOOL CALL <name> / TOOL RESULT <name> (error?) / USER SHELL (exit N) / EXTENSION <type>` text transcript; `redactSecrets(text)` (Bearer/Basic tokens, `sk-`/`gh*`/JWT patterns, `key: value` assignments, query params); constants `TOOL_ARGUMENT_MAX_BYTES` (2 000), `TOOL_RESULT_MAX_BYTES` (8 000), `TRANSCRIPT_MAX_BYTES` (200 000).
-- **`src/prompt.ts`** — `ADVISOR_PROMPT_SNIPPET` (tool-list line), `ADVISOR_TOOL_DESCRIPTION` (full schema description with when-to-call rules), `ADVISOR_PROMPT_GUIDELINES` (5 guidelines bullets), `ADVISOR_SYSTEM_PROMPT` (what the advisor model sees), `buildAdvisorRequest(transcript)` (wraps the transcript in `<conversation>…</conversation>`).
+### Module exports
+
+- `index.ts` exports `advisor(pi: ExtensionAPI)` by default. It registers the tool, the `/advisor` command, and the `session_start` handler.
+- `src/settings.ts` exports `AdvisorSettings` (`enabled`, `provider`, `model`, `effort`, `maxTokens`), `DEFAULT_ADVISOR_SETTINGS`, `ADVISOR_SETTINGS_PATH`, `modelKey(settings)` (returns `"<provider>/<model>"` for a settings pair, distinct from the registry-model `modelKey` in `shared/subagent-models.ts`), `parseAdvisorSettings(value)`, `loadAdvisorSettings()`, and `saveAdvisorSettings(settings)`.
+- `src/consult.ts` exports `consultAdvisor({ deps, settings, transcript, signal })`, which returns `ConsultResult { advice, durationMs, truncated }`. `makeConsultDeps(modelRegistry)` wires `findModel`, `getAuth` and `complete` to the live registry, while `ConsultDeps` stays injectable for tests. `AdvisorError` is the thrown class, `ADVISOR_TIMEOUT_MS` is 10 minutes, and `ADVISOR_MAX_RETRIES` is 1.
+- `src/transcript.ts` exports `serializeAdvisorTranscript(entries, maxBytes = TRANSCRIPT_MAX_BYTES)`, which renders `SessionEntry[]` as `USER`, `ASSISTANT`, `TOOL CALL <name>`, `TOOL RESULT <name> (error)`, `USER SHELL (exit N)` and `EXTENSION <type>` blocks, where the error and exit markers appear only when applicable. `redactSecrets(text)` strips bearer and basic tokens, `sk-`, `gh*` and JWT patterns, secret-looking `key: value` assignments, and secret query parameters. `TOOL_ARGUMENT_MAX_BYTES` is 2000, `TOOL_RESULT_MAX_BYTES` is 8000, and `TRANSCRIPT_MAX_BYTES` is 200000.
+- `src/prompt.ts` exports `ADVISOR_PROMPT_SNIPPET`, `ADVISOR_TOOL_DESCRIPTION`, `ADVISOR_PROMPT_GUIDELINES` (5 bullets), `ADVISOR_SYSTEM_PROMPT`, and `buildAdvisorRequest(transcript)`, which wraps the transcript in `<conversation>` tags.
+
+The five guidelines tell the agent to call the advisor before substantive work and before building on an assumption, to make the deliverable durable before declaring the task complete, to call when stuck or when considering a different approach, to give the advice serious weight while adapting when a step fails empirically or primary-source evidence contradicts a specific claim, and to surface a conflict between retrieved evidence and the advice in one more advisor call instead of switching without telling the advisor.
+
+`advisor.test.ts` has 14 tests covering settings parsing and per-field fallback, transcript rendering, redaction and middle-elision, the consult success, truncation and failure paths, and `buildAdvisorRequest`.
 
 ## Examples
 
-1. **Agent consults before substantive work** (mid-turn tool call): the agent calls `advisor()` with no arguments after doing orientation reads; the extension serializes the session and returns the advisor's advice as tool output with `details.model`/`effort`/`durationMs`/`truncated` metadata.
-2. **User reconfigures the advisor model**: `/advisor` → pick `deepseek/deepseek-v4-pro` from the picker → pick `high` thinking → the tool stays/becomes active and the tool-line shows the new model.
-3. **User disables the advisor**: `/advisor off` — the tool is removed from the active set and the "when to call advisor" prompting leaves the system prompt, so the agent stops trying to call it.
-4. **Agent with a disabled advisor**: calling `advisor` returns "The advisor is disabled — run /advisor to pick a model…" instead of failing, so the agent can relay the instruction to the user.
+1. The agent calls `advisor()` with no arguments after its orientation reads. The extension serializes the session, sends it to the configured model, and returns the advice as tool output. The result's `details` carries the model, effort, duration and truncation flag, and the call row shows `advisor openrouter/anthropic/claude-opus-4.8`.
+2. `/advisor` with no arguments opens the picker. Selecting `deepseek/deepseek-v4-pro` opens the effort selector, and choosing `high` saves `{ "enabled": true, "provider": "deepseek", "model": "deepseek-v4-pro", "effort": "high" }` alongside the existing `maxTokens`. The notify reads `Advisor: deepseek/deepseek-v4-pro · high`.
+3. `/advisor off` saves `enabled: false`, removes `advisor` from the active tool set, and drops its snippet and guidelines from the system prompt, so the agent stops trying to call it.
+4. An agent that calls `advisor` while the advisor is disabled gets back a message saying the advisor is disabled and to run `/advisor`, rather than a thrown error. The agent can pass that instruction to the user.
