@@ -8,99 +8,60 @@ Injects dynamic system-reminder messages before each LLM call from a shared gene
 
 ---
 
-# Reminders (system-reminder injector)
+# Reminders
 
-Claude Code's system-reminder mechanism for pi: before every LLM call (the `context` event), runs every registered reminder generator from the shared registry (`shared/reminders.ts`) and appends their output as a single hidden `<system-reminder>` user message. The extension itself registers no tools, commands, or shortcuts — it is purely the **injector**; consumers register generators through the registry (none does at present — see Consumers). Exists so dynamic per-request facts (tool-pool changes, connect/disconnect, standing nudges) reach the model without rebuilding the cached system prompt.
+The reminders extension is the system-reminder injector. Before each LLM call it runs every generator registered in `shared/reminders.ts` and appends the output to the conversation as one hidden `<system-reminder>` user message. It registers no tools, commands, or shortcuts.
 
-## Key concepts
+## Claude Code lineage
 
-- **Per-LLM-call injection.** `pi.on("context")` fires before each LLM call with a deep-copy `event.messages` array. The handler appends one reminder message to the end of it — never part of the system prompt — so the cached prompt prefix is untouched and cache-preserving (same shape as CC: user-role text wrapped in reminder tags).
-- **Single message, batched.** All generators that speak on a given call contribute paragraphs; they are joined with `\n\n` and wrapped once as `<system-reminder>\n…\n</system-reminder>` in one `user` message. Generator order = `Map` insertion order (registration order).
-- **Interval clock.** One install-wide `callCount` increments per `context` event. Per generator, `lastInjectedAt` records the call count of its **last actual emission** (not last compute). A generator with `interval: N` is forced (`compute(true)`) when `callCount - lastInjected >= N`. Because the clock only advances on emission, a generator that returns `null` even when forced is re-forced on every subsequent call until it speaks — `interval` means "keep offering the floor every N calls until you emit", matching its docstring "Re-run compute(force=true) every N LLM calls, even when it returned null".
-- **Delta-based.** `createAnnouncedDelta` tracks an announced-name set. `getBaseline()` names are seeded silently (the standing prompt — e.g. a tool description — already lists them); only post-baseline adds/removes produce reminders; silence otherwise. `compute(force)` returns `null` when forced — standing intervals are meaningless for deltas. `reset()` re-reads `getBaseline()` fresh (not frozen), so a new session re-announces the current pool.
-- **Session-scoped.** `pi.on("session_start")` calls `resetReminderGenerators()` (each generator's `reset?.()`, re-seeding announced sets), clears `lastInjectedAt`, and zeroes `callCount`. A new session re-announces state that is already in the conversation.
-- **Inert without consumers.** `getReminderGenerators()` empty → the `context` handler returns immediately; registration is always safe even if this extension is absent (a package outside the extension tree uses a guarded dynamic import). Blank output (`text.trim().length === 0`) is skipped.
-- **Literal text transport.** The tag travels as plain text in a `user`-role message — pi maps custom messages to user-role text, and reasoning-capable models treat the tags as instructions regardless of provider. Don't conflate with the **memory** extension's recall injection: that is a separate mechanism (its own `<system-reminder>` wrapping injected at `before_agent_start`), not this registry.
+The injector mirrors Claude Code's system-reminder mechanism: user-role text wrapped in `<system-reminder>` tags, appended after the cached prompt prefix. `createAnnouncedDelta` follows Claude Code's `deferred_tools_delta` semantics for announced-name tracking. The feature commit `61709db feat(reminders): system-reminder injector` (2026-08-12), the source, and the earlier docs record no Claude Code release, so the version the mechanism came from is not recorded.
+
+## How it works
+
+The `context` event fires before each LLM call with a deep copy of `event.messages`. When at least one generator is registered, the handler increments an install-wide `callCount`, runs each generator, and pushes one message onto the copy when a generator returns text. The message has `role: "user"` and holds one text block wrapped in `<system-reminder>` tags. It lands after the cached prompt prefix, so the prompt cache stays valid. All generators that speak on a call share that one message, in registry insertion order, with their trimmed texts joined by `\n\n`. Blank output is skipped, and an empty registry leaves the message list untouched. The tags are plain text in a `user` message, not a custom message type.
+
+`lastInjectedAt` records the call count of each generator's last emission, not its last compute. A generator with `interval: N` is called with `force: true` when `callCount - lastInjected >= N`. A forced generator that returns `null` is offered the floor again on each later call until it emits. `session_start` then calls `resetReminderGenerators()`, clears `lastInjectedAt`, and sets `callCount` back to zero, so a new session re-announces state that is already in the conversation.
+
+`createAnnouncedDelta` tracks a set of announced names. Names from `getBaseline` seed the set without a reminder, since the standing prompt already lists them. Only names that enter or leave the pool after that produce a reminder. `compute` returns `null` when `force` is true, because a standing interval has no meaning for a delta. `reset` re-reads `getBaseline`, so a new session re-announces the current pool.
 
 ## API
 
-No tools, commands, shortcuts, or config files. The public surface of `extensions/reminders/index.ts`:
+`extensions/reminders/index.ts` exports:
 
-- **default export `reminders(pi: ExtensionAPI): void`** — the extension entry point (auto-loaded from `extensions/reminders/index.ts`); just calls `installReminders(pi)`.
-- **`installReminders(pi: Pick<ExtensionAPI, "on">): void`** — registers the two event handlers. Takes only `on`, which makes it trivially testable with a stub pi (the tests do exactly this).
-- **`buildReminderMessage(texts: readonly string[]): ReminderMessage`** — wraps texts in the tag pair (`OPEN_TAG`/`CLOSE_TAG` = `<system-reminder>`/`</system-reminder>`, module-private), `\n\n`-joined, with `timestamp: Date.now()`.
-- **`type ReminderMessage = { role: "user"; content: Array<{ type: "text"; text: string }>; timestamp: number }`** — the exact message shape pushed onto `event.messages`.
+- `reminders(pi: ExtensionAPI): void` as the default export, which calls `installReminders(pi)`.
+- `installReminders(pi: Pick<ExtensionAPI, "on">): void`, which registers the two event handlers. It takes only `on`, so a test can pass a stub.
+- `buildReminderMessage(texts: readonly string[]): ReminderMessage`, which joins the texts with `\n\n`, wraps them in the module-private `OPEN_TAG` and `CLOSE_TAG` (`<system-reminder>` and `</system-reminder>`), and sets `timestamp: Date.now()`.
+- `type ReminderMessage = { role: "user"; content: Array<{ type: "text"; text: string }>; timestamp: number }`, the shape pushed onto `event.messages`.
 
-### Events
+The injector listens on two events. `context` runs the registry, mutates the deep copy, and returns nothing. `session_start` calls `resetReminderGenerators()`, clears `lastInjectedAt`, and zeroes `callCount`.
 
-- **`context`** — the injector. If no generators are registered, returns. Otherwise increments `callCount`, runs each generator with the interval-force rule above, collects non-blank trimmed texts, and if any exist pushes `buildReminderMessage(texts)` onto `event.messages` (mutation of the deep copy; no return value).
-- **`session_start`** — state reset: `resetReminderGenerators()`, `lastInjectedAt.clear()`, `callCount = 0`. Why it matters: per-conversation announced state and the interval clock must not leak across sessions, or deltas would never re-announce in a fresh conversation.
+The consumer-facing API is the registry in `shared/reminders.ts`, and consumers never import the injector. [shared.md](shared.md) holds the full reference. Static facts belong in a tool `description` or `promptSnippet`, durable user-visible state in `pi.appendEntry`, and one-shot steering in `pi.sendMessage(..., { deliverAs: "steer" })`.
 
-### Registry (`shared/reminders.ts`) — the consumer-facing API
-
-Extensions and packages use this module, never the injector. Full reference in `shared.md`; the surface:
-
-- `registerReminderGenerator(generator: ReminderGenerator): void` — `ReminderGenerator = { id: string; compute(force: boolean): string | null; interval?: number; reset?(): void }`. `null` = silent this call; re-registering an id replaces the previous generator.
-- `unregisterReminderGenerator(id: string): boolean` — true if it was registered.
-- `getReminderGenerators(): readonly ReminderGenerator[]` — snapshot in registration order (used by the injector).
-- `resetReminderGenerators(): void` — calls `reset?.()` on every generator (used by the injector on `session_start`).
-- `createAnnouncedDelta({ id, getCurrent, getBaseline?, renderAdded, renderRemoved }): ReminderGenerator` — announced-name tracking: `getCurrent: () => readonly string[]` is the tracked pool; `getBaseline?: () => readonly string[]` seeds the announced set silently (re-evaluated on reset); `renderAdded`/`renderRemoved: (names) => string` format the delta text. Returns `null` when nothing changed or when forced.
-
-The generator registry (`registerReminderGenerator`/`unregisterReminderGenerator`/`getReminderGenerators`/`resetReminderGenerators`) is backed by a `globalThis` slot (`Symbol.for("pi.shared.reminders.generators")`), so the injector and a separately-installed package (e.g. one under `npm/node_modules`) resolve the same registry even across duplicated module instances.
+- `ReminderGenerator = { id: string; compute(force: boolean): string | null; interval?: number; reset?(): void }`. `compute` returns the reminder text for this call or `null` when it has nothing to say, `interval: N` re-runs `compute(true)` every N calls, and `reset` runs on session start.
+- `registerReminderGenerator(generator: ReminderGenerator): void` replaces a generator when the id matches.
+- `unregisterReminderGenerator(id: string): boolean` returns true when it removed one.
+- `getReminderGenerators(): readonly ReminderGenerator[]` returns a snapshot in registration order.
+- `resetReminderGenerators(): void` calls `reset?.()` on every generator.
+- `createAnnouncedDelta({ id, getCurrent, getBaseline?, renderAdded, renderRemoved }): ReminderGenerator`. `getCurrent: () => readonly string[]` is the tracked pool, `getBaseline?: () => readonly string[]` seeds the announced set, and both renderers take `readonly string[]`.
 
 ## Examples
 
-Register a standing nudge — the model is offered the reminder every 3rd LLM call until it emits (a delta or policy reminder that should re-surface periodically):
+Two registrations, a standing nudge and a baseline-seeded delta:
 
 ```ts
 registerReminderGenerator({
   id: "policy-nudge",
   interval: 3,
-  compute: (force) =>
-    force ? "Reminder: never run `git push` without asking first." : null,
+  compute: (force) => (force ? "Never run `git push` without asking." : null),
 });
 ```
 
-Announce pool changes with baseline seeding — names already in the standing prompt are seeded silently; only post-baseline changes remind:
-
 ```ts
-registerReminderGenerator(
-  createAnnouncedDelta({
-    id: "available-tools",
-    getCurrent: () => [...pooledTools.keys()],
-    getBaseline: () => [...promptedToolNames],
-    renderAdded: (names) =>
-      `New tools are now available: ${names.join(", ")}. Their schemas are NOT in the prompt — activate them before calling by name.`,
-    renderRemoved: (names) =>
-      `The following tools are no longer available: ${names.join(", ")}.`,
-  }),
-);
+registerReminderGenerator(createAnnouncedDelta({
+  id: "available-tools",
+  getCurrent: () => [...pooledTools.keys()],
+  getBaseline: () => [...promptedToolNames],
+  renderAdded: (names) => `New tools: ${names.join(", ")}.`,
+  renderRemoved: (names) => `Dropped tools: ${names.join(", ")}.`,
+}));
 ```
-
-What the model actually receives (two generators speaking on one call → one batched message):
-
-```text
-<system-reminder>
-New tools are now available: notion_create_page, slack_send_message.
-
-Reminder: never run `git push` without asking first.
-</system-reminder>
-```
-
-Guarded registration from an npm package (safe without the reminders extension installed):
-
-```ts
-const { registerReminderGenerator } = await import(
-  "../../../extensions/shared/reminders.ts"
-);
-registerReminderGenerator(/* ... */);
-```
-
-## When to use a reminder vs. alternatives
-
-| Need | Mechanism |
-|---|---|
-| Dynamic per-request fact (pool/tool changes, connect/disconnect, standing nudge) | register a generator → `<system-reminder>` |
-| Static fact | tool description / `promptSnippet` |
-| Durable user-visible state | `pi.appendEntry` |
-| One-shot steering | `pi.sendMessage(..., { deliverAs: "steer" })` |

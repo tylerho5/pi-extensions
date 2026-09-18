@@ -8,94 +8,142 @@ Claude Code-style persistent file-based memory, with per-turn recall and idle-tr
 
 ---
 
-# Memory (auto-memory system)
+# Memory
 
-Claude Code's persistent file-based memory, ported to pi. One fact per markdown file in a per-working-directory directory (`<agentDir>/memory/<--cwd-slug-->/`), indexed by `MEMORY.md` which is loaded into the system prompt every session. **No new model-facing tools** — the agent reads and writes memory files with the standard `read`/`write`/`edit` tools, taught by a memory prompt injected via `before_agent_start`. The extension's own machinery is invisible plumbing: a per-turn relevance recall (a cheap model picks which memories to inject), an idle-triggered consolidation "dream" that runs a confined child session, a pause toggle, and a dream run log.
+Claude Code 2.1.220's persistent file-based memory, ported to pi. Memories are markdown files in a per-working-directory folder, indexed by `MEMORY.md`, which loads into the system prompt every session. The extension registers no model-facing tools. The agent reads and writes memories with `read`, `write` and `edit`, taught by a prompt injected at `before_agent_start`.
 
-## Key concepts
+## Claude Code lineage
 
-- **Per-cwd memory dir.** `memoryDir(cwd)` = `<agentDir>/memory/<projectSlug(cwd)>/`, where `projectSlug` encodes the cwd exactly like pi's `sessions/` directory names (`--<cwd with / and : → ->--`), so memory sits beside the sessions it was written in. `PI_MEMORY_DIR` overrides the whole directory (used by tests/sandboxes). The dir always carries a trailing separator so the prompt reads it as a directory.
-- **The index is loaded, not the files.** `MEMORY.md` (the only file always in context) is snapshotted once per `session_start`/`session_compact` into `indexSection` and kept stable for prompt caching. It is capped at 200 lines / 25,000 chars (`INDEX_MAX_LINES`/`INDEX_MAX_CHARS`); when cut, the model sees a `> WARNING:` block with the overage and the "one line under ~200 chars" reminder. Memory bodies are read on demand by the agent (or by recall).
-- **Prompt variant per model.** `resolveVariant` reproduces Claude Code's per-model choice: `auto` serves the verbose `full` prompt (types XML + worked examples) to everything not carrying Claude Code's `lean_prompt` capability — in practice all pi models get `full`; `terse` (short reminder) goes to `claude-opus-4.8/5`, `claude-fable-5`, `claude-mythos-5`, and `-eap` ids. `promptVariant: "full" | "terse"` pins it. The prompt text is a verbatim port of CC 2.1.220 with three marked adaptations (tool names lowercase, CLAUDE.md→AGENTS.md, CC plan-mode bullets dropped).
-- **Recall = per-turn relevance prefetch.** On every `before_agent_start`, if `recall.enabled`, the turn is *blocked* on a cheap selector call: `listMemoryCandidates` (recursive `.md` walk, max 200, newest first, frontmatter-only — `name`/`description`/`type` parsed tolerantly, bodies never read at list time) → `selectMemories` (a one-shot completion on `recall.provider`/`recall.model`, default `deepseek/deepseek-flash`, 512 max tokens, 8s timeout, reasoning off) → bodies read → formatted into one message of `<system-reminder>` blocks (first carries the "Retrieved for possible relevance" preamble; memories >1 day old get a staleness caveat; each starts with `Memory: <path>:`) and delivered as a single user message. Fail-open: any selector failure (missing model/key, timeout, bad reply) surfaces nothing and the turn proceeds.
-- **Recall dedupe survives restarts.** `RecallLedger` marks injected paths and counts bytes (60 KB session budget, `MAX_SESSION_BYTES`); a single bare-token query is skipped (`hasSelectableQuery`, CJK exempt). The ledger is **rebuilt from the session transcript** at every `session_start` (resume/reload/fork don't rebuild the conversation, so surfaced memories stay marked) and reset only on `session_compact`, where the conversation is rebuilt. Recall rows are transcript messages of custom type `memory-recall`, rendered collapsed as one muted "✦ recalled N memories: …" line, expanded to the exact reminder text the model saw.
-- **Dream = background consolidation.** A confined child session (`SessionManager.inMemory()`, so it never writes a session file that would count itself in gate 7) runs the ported "Dream: Memory Consolidation" prompt (4 phases: orient, gather from serialized session excerpts, consolidate, prune+index; reconcile against AGENTS.md). Triggered by `/dream` (manual) or idle: `agent_settled` arms a timer (`dream.idleDelayMs`, default 300 s) that `input`/`user_bash`/`before_agent_start` cancel; an in-flight dream is **never aborted by user activity** — only by shutdown or a cap — so a half-written merge is never left without its replacement.
-- **Dream confinement.** The child gets only `read` + `bash`/`write`/`edit` replaced by confined versions (`buildDreamTools`): writes/edits must resolve inside the memory dir; bash runs with cwd = memory dir and is limited to a read-only command allowlist (`ls cat head tail wc grep rg diff stat pwd echo nl cut tr comm sort uniq`) plus `rm -f <file>.md` inside the memory dir; pipes are allowed only between read-only stages; `` ` ; < > & $() || `` are rejected outright. Each tool call is wrapped in `runWithToolCallTimeout` (30 min). The prompt's `DREAM_TOOL_CONSTRAINTS` block states exactly this, and the tests assert prompt and handler agree.
-- **Dream gates & lock.** `evaluateGates` runs 8 gates in order: (1) TUI only, (2) memory enabled, (3) not paused, (4) `dream.enabled` (auto only), (5) ≥ `minHours` (24) since last consolidation, (6) last scan > 10 min ago (per-process throttle), (7) ≥ `minSessions` (5) main sessions touched since then (excluding the current), (8) lock acquired. `/dream` bypasses 4–7 but respects 1–3 and 8. The lock is `.consolidate-lock` in the memory dir (filename matches Claude Code): **mtime = last-consolidated timestamp, contents = owning PID**; stale after 1 h, PID readback resolves takeover races. `failed` rolls the lock back (a config fix lets the next idle dream retry); `aborted` (cap trip, cancel) and `completed` keep it, so a half-dream consumes the window rather than retry-looping its spend. Caps: `maxTurns` 30, `maxCostUsd` $5.
-- **Dream sources.** `sessionsTouchedSince` scans `<agentDir>/sessions/<cwd-slug>/<flat-iso>_<uuid>.jsonl`, classifying main vs subagent/`btw` runs by scanning the first 8 KB for a `session_info` entry named `subagent: …`/`btw: …` (btw session files keep that entry before the inherited parent context so it always lands in range). Only mains count toward gate 7; subagent transcripts ride along in serialization so their facts aren't lost. **btw sessions are excluded from the pipeline entirely** — never counted, never serialized: a side-question answer is user-facing output, and its file duplicates the main conversation. `serializeSessions` budgets `transcriptBudgetBytes` (96 KB): mains first (newest), then subagents fill the remainder; every block passes through `redactSecrets` before the dream sees it — an unredacted credential would become a permanent memory.
-- **Everything is logged.** Every dream attempt — fired or gated — appends one JSON line to `dreams.jsonl` in the memory dir (status, trigger, reason, model, duration, turns, cost, tokens, files touched, summary). The dream's own `rm` can't delete it (`.md` operands only) and nothing tells the dream to edit it. `/dream-log` renders it.
+`src/prompt.ts` holds both prompt variants verbatim from the 2.1.220 bundle, apart from three adaptations the source marks with `PI:` comments. Pi names its tools lowercase, so "the Write tool" reads "the write tool". The AGENTS.md exclusion replaces CLAUDE.md. Claude Code follows its persistence heading with bullets steering the model toward Plan mode and a task list, and those bullets are dropped while the principle they serve stays.
+
+Version 2.1.220 is the release the current port text came from. The baseline commit `a236070` (2026-08-01) already carried that version string in `src/prompt.ts`, and no later commit changed the prompt constants.
+
+Other modules cite the same release: the selector system prompt and prefetch orchestration (`src/selector.ts`, `src/recall.ts`), the injected memory header, staleness note and `<system-reminder>` wrapper (`src/injection.ts`), index truncation (`src/index-file.ts`), the per-model variant gate (`src/variant.ts`), and the dream prompt and its gates (`src/dream/prompt.ts`, `src/dream/gate.ts`).
+
+Three divergences in the recall path are deliberate. Claude Code constrains the selector reply with a provider-side JSON schema, and pi requests the JSON in the prompt and parses it defensively because many providers lack that schema support. Claude Code emits one internal message per surfaced memory, and pi delivers one injected user message holding the same blocks. Claude Code hardcodes Sonnet as the selector, and pi makes the recall model configuration.
+
+The dream prompt marks seven adaptations. It reads pre-serialized transcripts instead of running a raw JSONL grep, has no `logs/` activity stream, reconciles against AGENTS.md, omits the team-memory tier, uses lowercase tool names, runs a tidy-only pass when no sessions are found, and tightens the index-line demote trigger to roughly 150 characters so it matches the target the prompt states.
+
+## How it works
+
+The memory directory is `<agentDir>/memory/<projectSlug(cwd)>/`. `projectSlug` matches the encoding pi already uses for its `sessions/` directories, so memory sits beside the sessions it was written in. `PI_MEMORY_DIR` replaces the whole path, which is how the tests and sandboxes point memory elsewhere, and `memoryDir` always returns a trailing separator so the prompt reads it as a directory. The extension creates the directory on session start and before `/memory` opens, so the injected prompt can say the directory already exists.
+
+`MEMORY.md` is the only file always in context. It is read once per `session_start` and `session_compact` into `indexSection` and held stable for the rest of the session. `truncateIndex` caps the index at 200 lines or 25,000 characters, whichever limit trips first, cuts at the last newline inside the budget, and appends a `> WARNING:` block naming the overage. An absent or empty index injects a short section saying the index is empty. A manual `/memory` save and a finished dream do not refresh the snapshot, because changing the system prompt mid-session invalidates the cached prefix. Fresh content reaches the model through per-turn recall and the `read` tool.
+
+`resolveVariant` reproduces Claude Code's per-model choice. `auto` serves the verbose `full` prompt, which carries the four memory types with worked examples, the exclusion list, the save procedure and the recall rules, to every model that does not carry Claude Code's `lean_prompt` capability. The lean list is `claude-opus-4-8`, `claude-opus-5`, `claude-fable-5` and `claude-mythos-5`, plus any `-eap` id, so a session on one of those gets `terse` and every other model gets `full`. Matching is by substring on a lowercased id where dots and underscores fold to dashes, so a provider prefix does not matter. `promptVariant` pins the choice to `full` or `terse`.
+
+Recall is a per-turn relevance prefetch. When `recall.enabled` is true, `before_agent_start` blocks the turn on a one-shot selector call. `listMemoryCandidates` walks the memory directory recursively, keeps `.md` files other than the index, sorts them newest first and caps the list at 200. It parses frontmatter only (`name`, `description`, and `type` at the top level or nested under `metadata:`) and passes no body text to the selector. `selectMemories` sends the candidate lines and the user query to the recall model and asks for at most five filenames. `runRecall` then reads the chosen bodies. The selector runs with a 512 token cap, `maxRetries` 1, an 8 second timeout, reasoning off by default, and a prompt-requested `{"selected_memories": [...]}` reply that `parseSelectedFilenames` reads defensively. Any failure, including a missing model or key, a timeout or an unparseable reply, returns nothing and the turn proceeds.
+
+The selected bodies become one user message holding one `<system-reminder>` block per memory. The first block carries a preamble asking the model to use a memory only if it applies. A memory older than one day gets a note saying how old it is, that memories are point-in-time observations, and that the reader should verify against current code, followed by a `Memory: <path>:` header. The `RecallLedger` marks the injected paths and totals their bytes against a 60,000 byte session budget. It rebuilds itself from the session transcript at every `session_start`, so a resume, reload or fork does not re-inject what the session already saw, and it resets on compaction, where the conversation is rebuilt. A query that is a single token with no spaces is skipped, and CJK text is exempt from that rule because it has no spaces. The footer shows `✦ recalled N memories`, and the transcript shows a collapsed `memory-recall` row that expands to the exact text the model received.
+
+Memory writes get their own transcript row. `tool_result` stashes `write` and `edit` calls whose resolved path lands inside the memory directory, and `message_end` appends a `memory-write` entry once the tool result is not an error. The row reads `✦ memory saved: <name>` for a write, `✦ memory updated: <name>` for an edit, and `✦ memory index updated` for `MEMORY.md`. Ctrl+o adds the full path.
+
+A dream is a background consolidation pass in a child session built with `SessionManager.inMemory()`, so it never writes a session file that its own scan would later count. `/dream` starts one on demand. When `dream.enabled` is true, `agent_settled` arms a timer for `idleDelayMs`, and an interactive input, a `user_bash` call or a new run cancels it. User activity never aborts a dream already in flight, because a half-written merge would be left without its replacement. Only a shutdown or a cap trip stops it, and a status line reports `✦ dreaming… (turn N/M)`.
+
+The child runs the ported "Dream: Memory Consolidation" prompt. It walks four phases (orient, gather, consolidate, prune and reindex) and then reconciles feedback and project memories against AGENTS.md. Its tools are `read` plus confined replacements for `bash`, `write` and `edit`. A write or edit must resolve strictly inside the memory directory. Bash runs with the memory directory as its working directory and accepts read-only commands (`ls cat head tail wc grep rg diff stat pwd echo nl cut tr comm sort uniq`), a `rm -f <file>.md` inside the memory directory, and pipes whose every stage is itself read-only. Backticks, `;`, `&&`, `||`, `>`, `<`, `&` and `$()` are rejected outright. The runner passes an explicit `tools` allowlist rather than `noTools`, because `noTools: "all"` would empty the allowlist and drop the custom confined tools with it. Every call is wrapped in `runWithToolCallTimeout` at 30 minutes. `DREAM_TOOL_CONSTRAINTS` states the same rules to the model, and a test asserts that the prompt list and the handler list agree.
+
+`evaluateGates` runs eight gates in order: the interactive TUI, memory enabled, not paused, `dream.enabled`, at least `minHours` (24) since the last consolidation, more than 10 minutes since the last scan in this process, at least `minSessions` (5) main sessions touched since then, and lock acquisition. `/dream` bypasses gates 4 through 7 and still respects the TUI, enabled, paused and lock gates. The lock is `.consolidate-lock` in the memory directory, the same filename Claude Code uses. Its mtime is the last consolidated timestamp and its contents are the owning PID, so an existing Claude Code memory directory keeps its timestamp. A lock older than one hour is stale. After writing its PID the process reads the file back, which resolves the race where two processes take over the same stale lock. A `failed` dream rolls the lock back so a config fix can retry, while `aborted` and `completed` keep it so a half-finished dream consumes the window instead of retrying its spend. The caps are `maxTurns` 30 and `maxCostUsd` 5.
+
+`sessionsTouchedSince` scans `<agentDir>/sessions/<projectSlug(cwd)>/` for transcripts newer than the last consolidation. It reads the first 8 KB of each file to find the header id, the start time and any `session_info` entry named `subagent: …` or `btw: …`. Only main sessions count toward gate 7. Subagent transcripts are serialized so facts discovered there are not lost, and btw sessions are excluded from the pipeline entirely because a side-question answer duplicates the main conversation. `serializeSessions` spends `transcriptBudgetBytes` (96,000) on main sessions first and newest first, then fills the remaining budget with subagent sessions. Every block passes through `redactSecrets` before the dream reads it, because an unredacted credential would become a permanent memory.
+
+Every dream attempt appends one JSON line to `dreams.jsonl` in the memory directory with its trigger, status, reason, model, duration, turns, cost, tokens, touched files and summary. Gated attempts are logged as `skipped` with the gate reason. The dream cannot delete the log, because its `rm` accepts only `.md` operands, and a failed log write never interrupts the dream. A fired dream also appends a `dream-outcome` entry. Collapsed, it reads `✦ Dream consolidated N memory files` with the cost and token count, and the aborted variant starts with `Dream stopped early`. Ctrl+o adds the dream's own summary. A failed dream uses a warning notification instead, so errors stay visible, and a manual `/dream` that was gated reports the reason.
+
+`/pause-memory` flips a per-session flag using Claude Code's notice wording. While paused, `before_agent_start` injects neither the prompt nor a recall message, and `agent_settled` does not arm the dream timer. The flag resets at `session_start`.
 
 ## API
 
-No `registerTool`, no `registerShortcut`. Model-facing behavior comes entirely from the injected prompt + recall message; everything else is commands, events, and renderers.
+No `registerTool`. Model-facing behavior comes from the injected prompt and the recall message. Everything else is commands, events and renderers.
 
 ### Commands
 
 | Command | Purpose |
 |---|---|
-| `/memory` | Pick a memory file from a `ctx.ui.select` (index first, then alphabetical) and edit it in an `ExtensionEditorComponent` (Ctrl+G hands off to the `externalEditor` setting → `$VISUAL` → `$EDITOR` → nano). Undefined when cancelled; unchanged content is not written; `indexSection` reloaded after save. TUI only. |
-| `/dream` | Run a consolidation now. TUI only; notifies "A dream is already running" if one is in flight. Bypasses the auto-toggle, time window, scan throttle, and session count (gates 4–7), still takes the lock. Appends a `dream-outcome` entry — collapsed headline with cost + tokens, the dream's summary behind ctrl+o — or the reason when gated. |
-| `/dream-log` | Open the persistent dream run log pane (TUI only). Right-anchored overlay (`anchor: "right-center"`, width 60%, min 72, max 90% height); re-reads `dreams.jsonl` on open and on `r`; ↑↓/pgup/pgdn scroll, enter expands an entry (model, duration, touched files, wrapped summary), esc/q close. |
-| `/dream-auto` | Toggle `memory.dream.enabled` in the **global** settings.json, preserving all other keys (temp-file + rename write; read errors surface rather than risk a silent wipe). Warns when a project-level `memory.dream.enabled` overrides the global value. `/dream` manual always works regardless. |
-| `/pause-memory` | Toggle the per-session `paused` flag with Claude Code's own notice wording. While paused, `before_agent_start` skips both prompt injection and recall, and the idle dream is never armed. |
+| `/memory` | Picks a memory file in a `ctx.ui.select` (index first, then alphabetical) and opens it in an `ExtensionEditorComponent`. Ctrl+G hands off to the `externalEditor` setting, then `$VISUAL`, then `$EDITOR`, then nano. Cancel returns undefined, unchanged content is not written, and the saved file gains a trailing newline. TUI only. |
+| `/dream` | Runs a consolidation now. TUI only, and notifies `A dream is already running.` when one is in flight. Bypasses the automatic toggle, the time window, the scan throttle and the session count (gates 4 to 7), and still takes the lock. Notifies the gate reason when nothing runs. |
+| `/dream-log` | Opens the dream run pane. TUI only. The pane is a bottom-anchored full-width overlay docked above the footer (`anchor: "bottom-center"`, width `100%`, max height 60%, bottom margin 3, inner viewport 45% of the terminal rows). It re-reads `dreams.jsonl` on open and on `r`. Up, down, page up and page down scroll, enter expands an entry, and escape or `q` closes. Entries are colored by status, and an expanded entry lists the model and the created, edited and removed files. |
+| `/dream-auto` | Toggles `memory.dream.enabled` in the global `settings.json`, preserving every other key through a temp-file write and rename. Warns when a project-level `memory.dream.enabled` overrides the global value. |
+| `/pause-memory` | Toggles the per-session paused flag. |
 
 ### Events
 
-- `session_start` — reset `paused`, clear pending memory-write stashes, cancel the dream timer, set the dream status context, rebuild the `RecallLedger` from the session transcript (empty for a fresh session, marks everything for a resumed one), then snapshot the index if memory is enabled.
-- `session_compact` — `recallLedger.reset()` (the conversation is rebuilt here) and re-snapshot the index so anything saved this session lands in the prompt.
-- `tool_result` — stash `write`/`edit` calls whose resolved path is inside the memory dir, keyed by `toolCallId`.
-- `message_end` — for a `toolResult` message with a stashed path: append a `memory-write` transcript entry (`"saved"` / `"updated"` / `"index updated"` for MEMORY.md). This is the "a memory changed" row that lands directly under the tool row.
-- `before_agent_start` — the core hook: cancel the idle dream timer (user is active); if not paused and enabled, join `[existing prompt, memory prompt (variant-selected), indexSection]`; if recall enabled, run `recall()` and attach the `<system-reminder>` message (`customType: "memory-recall"`). Returns `{ systemPrompt, message }`. The status line shows "✦ recalled N memories" (`RECALL_STATUS_KEY = "memory"`).
-- `agent_settled` — arm the idle dream timer (TUI only, not paused, `dream.enabled`) for `idleDelayMs`, `.unref()`'d.
-- `input` / `user_bash` — cancel the pending dream timer (never the in-flight dream).
-- `session_shutdown` — cancel the timer; if a dream is running, `abort()` it and wait up to 2 s (`DREAM_SHUTDOWN_WAIT_MS`); clear the dream status line.
+- `session_start` resets `paused`, clears pending memory writes, cancels the dream timer, sets the dream status context, rebuilds the ledger from the session transcript, and snapshots the index when memory is enabled.
+- `session_compact` resets the ledger and re-snapshots the index.
+- `tool_result` stashes `write` and `edit` calls that land inside the memory directory, keyed by tool call id.
+- `message_end` appends the `memory-write` entry for a stashed tool result, skipping errors.
+- `before_agent_start` cancels the idle dream timer, then returns the joined system prompt and, when recall is enabled, the recall message. It returns nothing when memory is paused or disabled.
+- `agent_settled` arms the idle dream timer in the TUI when memory and automatic dreaming are enabled.
+- `input` from an interactive source and `user_bash` cancel the pending dream timer.
+- `session_shutdown` cancels the timer, aborts an in-flight dream and waits up to 2,000 ms (`DREAM_SHUTDOWN_WAIT_MS`) for it, then clears the status line.
 
 ### Renderers
 
-- `registerEntryRenderer("memory-write")` — collapsed: `✦ memory saved: <name>.md` / `✦ memory index updated`; expanded adds the full path.
-- `registerMessageRenderer("memory-recall")` — collapsed: `✦ recalled N memories: <names>`; expanded shows the exact `<system-reminder>` content the model received, so what the user sees and what the model saw never diverge.
-- `registerEntryRenderer("dream-outcome")` — the fired-dream result row. Collapsed: `✦ Dream consolidated 3 memory files · $0.03 · 53k tok.` (or the `Dream stopped early —` variant); expanded adds the dream's own summary. Failed dreams still use a warning notification — errors stay visible. The summary once rode along in a notification verbatim; the entry hides it until ctrl+o and survives resume as a one-liner.
+- `registerEntryRenderer("memory-write")` renders the memory write row and adds the full path when expanded.
+- `registerMessageRenderer("memory-recall")` renders the recall row and expands to the injected text.
+- `registerEntryRenderer("dream-outcome")` renders the fired dream headline and expands to the dream's summary.
 
-### Config (`settings.json`, `"memory"` key)
+### Config
 
-Read via `SettingsManager` global + project scopes (project wins), deep-merged so unset fields keep defaults. `PI_DISABLE_AUTO_MEMORY` (mirrors `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) forces `enabled: false` and wins over both.
+`settings.json` under a `memory` key. The global and project scopes are read through `SettingsManager`, the project wins, and nested blocks deep-merge so unset fields keep their defaults.
 
 ```jsonc
 "memory": {
-  "enabled": true,                     // whole system on/off (default true)
+  "enabled": true,                     // whole system on or off
   "promptVariant": "auto",             // "auto" | "full" | "terse"
   "recall": {
     "enabled": true,
-    "provider": "deepseek",            // selector model, must be in the registry
+    "provider": "deepseek",            // must resolve in the model registry
     "model": "deepseek-flash",
-    "reasoning": "off"                 // pi thinking levels: off|minimal|low|medium|high|xhigh|max
+    "reasoning": "off"                 // pi thinking levels
   },
   "dream": {
-    "enabled": false,                  // auto-dreaming is opt-in; /dream bypasses
+    "enabled": false,                  // automatic dreaming is opt-in
     "model": "deepseek/deepseek-v4-pro",
-    "effort": "max",                   // shared subagent-models Effort scale
+    "effort": "max",                   // shared subagent-models effort scale
     "minHours": 24,                    // gate 5
-    "minSessions": 5,                  // gate 7 (main sessions)
-    "idleDelayMs": 300_000,            // idle timer
-    "maxTurns": 30,                    // per-dream cap
+    "minSessions": 5,                  // gate 7, main sessions only
+    "idleDelayMs": 300000,             // idle timer
+    "maxTurns": 30,
     "maxCostUsd": 5,
-    "transcriptBudgetBytes": 96_000    // serialized session excerpt budget
+    "transcriptBudgetBytes": 96000     // session excerpt budget
   }
 }
 ```
 
 ### Environment variables
 
-- `PI_MEMORY_DIR` — override the memory directory wholesale (trailing separator ensured).
-- `PI_DISABLE_AUTO_MEMORY` — force `enabled: false` ("1"/"true"/"yes"/"on").
+- `PI_MEMORY_DIR` replaces the memory directory and keeps a trailing separator.
+- `PI_DISABLE_AUTO_MEMORY` forces `enabled: false` for any of `1`, `true`, `yes`, `on`, and wins over the settings file. It mirrors Claude Code's `CLAUDE_CODE_DISABLE_AUTO_MEMORY`.
 
-### Notable module exports (internals, tested directly)
+### Notable module exports
 
-`src/paths.ts`: `projectSlug`, `memoryDir`, `memoryIndexPath`. `src/prompt.ts`: `MEMORY_INDEX_FILENAME`, `INDEX_MAX_LINES` (200), `INDEX_MAX_CHARS` (25_000), `buildFullMemoryPrompt`, `buildTerseMemoryPrompt`. `src/index-file.ts`: `truncateIndex`, `readIndex`, `formatIndexSection`. `src/variant.ts`: `resolveVariant`, `claudeCodeClassification`, `wantsVerbosePrompt`. `src/settings.ts`: `loadMemorySettings`, `parseMemorySettings`, `DEFAULT_MEMORY_SETTINGS`, `REASONING_LEVELS`. `src/candidates.ts`: `listMemoryCandidates`, `parseFrontmatter`, `formatCandidateLine`, `packageCandidates`, `MAX_CANDIDATES` (200). `src/selector.ts`: `selectMemories`, `parseSelectedFilenames`, `SELECTOR_SYSTEM_PROMPT`, `MAX_SELECTED` (5). `src/recall-model.ts`: `createSelectorComplete`. `src/recall.ts`: `runRecall`, `MAX_SESSION_BYTES` (60_000), `hasSelectableQuery`. `src/recall-ledger.ts`: `RecallLedger`, `RECALL_MESSAGE_TYPE` ("memory-recall"). `src/injection.ts`: `formatRecalledMemories`, `stalenessNote`, `RECALL_PREAMBLE`. `src/dream/index.ts`: `maybeDream`, `runDreamNow`. `src/dream/gate.ts`: `evaluateGates`, `SCAN_THROTTLE_MS`. `src/dream/run.ts`: `runDream`. `src/dream/tools.ts`: `buildDreamTools`, `isAllowedDreamCommand`, `isInsideMemoryDir`, `READ_ONLY_COMMANDS`. `src/dream/lock.ts`: `acquireLock`, `rollbackLock`, `readLastConsolidatedAt`, `LOCK_FILENAME`, `LOCK_STALE_MS`. `src/dream/sessions.ts`: `sessionsTouchedSince`, `serializeSessions`. `src/dream/prompt.ts`: `buildDreamPrompt`, `DREAM_TOOL_CONSTRAINTS`. `src/dream/log.ts`: `appendDreamLog`, `readDreamLog`, `buildDreamLogEntry`, `DREAM_LOG_FILENAME` ("dreams.jsonl"). `src/dream/outcome.ts`: `buildDreamOutcomeData`, `renderDreamOutcome`, `DREAM_OUTCOME_ENTRY` ("dream-outcome"). `src/dream/log-pane.ts`: `DreamLogPane`, `showDreamLogPane`. `src/dream/settings.ts`: `persistDreamAutoEnabled`, `projectOverridesDreamEnabled`, `parseDreamSettings`, `DEFAULT_DREAM_SETTINGS`.
+Internals that tests import directly.
+
+- `src/paths.ts`: `projectSlug`, `memoryDir`, `memoryIndexPath`.
+- `src/prompt.ts`: `MEMORY_INDEX_FILENAME`, `INDEX_MAX_LINES` (200), `INDEX_MAX_CHARS` (25_000), `buildFullMemoryPrompt`, `buildTerseMemoryPrompt`.
+- `src/index-file.ts`: `truncateIndex`, `readIndex`, `formatIndexSection`.
+- `src/variant.ts`: `resolveVariant`, `claudeCodeClassification`, `wantsVerbosePrompt`.
+- `src/settings.ts`: `loadMemorySettings`, `parseMemorySettings`, `DEFAULT_MEMORY_SETTINGS`, `DEFAULT_RECALL_SETTINGS`, `REASONING_LEVELS`.
+- `src/candidates.ts`: `listMemoryCandidates`, `parseFrontmatter`, `formatCandidateLine`, `packageCandidates`, `MAX_CANDIDATES` (200).
+- `src/selector.ts`: `selectMemories`, `parseSelectedFilenames`, `buildSelectorPrompt`, `SELECTOR_SYSTEM_PROMPT`, `MAX_SELECTED` (5).
+- `src/recall-model.ts`: `createSelectorComplete`.
+- `src/recall.ts`: `runRecall`, `MAX_SESSION_BYTES` (60_000), `hasSelectableQuery`.
+- `src/recall-ledger.ts`: `RecallLedger`, `RECALL_MESSAGE_TYPE` (`memory-recall`), `recalledPathsFromEntry`.
+- `src/injection.ts`: `formatRecalledMemories`, `memoryHeader`, `stalenessNote`, `ageInDays`, `wrapSystemReminder`, `RECALL_PREAMBLE`.
+- `src/dream/index.ts`: `maybeDream`, `runDreamNow`.
+- `src/dream/gate.ts`: `evaluateGates`, `SCAN_THROTTLE_MS`.
+- `src/dream/run.ts`: `runDream`.
+- `src/dream/tools.ts`: `buildDreamTools`, `confineToolDefinition`, `isAllowedDreamCommand`, `isInsideMemoryDir`, `READ_ONLY_COMMANDS`.
+- `src/dream/lock.ts`: `acquireLock`, `rollbackLock`, `readLastConsolidatedAt`, `LOCK_FILENAME`, `LOCK_STALE_MS`.
+- `src/dream/sessions.ts`: `sessionsTouchedSince`, `serializeSessions`.
+- `src/dream/prompt.ts`: `buildDreamPrompt`, `DREAM_TOOL_CONSTRAINTS`.
+- `src/dream/log.ts`: `appendDreamLog`, `readDreamLog`, `buildDreamLogEntry`, `DREAM_LOG_FILENAME` (`dreams.jsonl`).
+- `src/dream/outcome.ts`: `buildDreamOutcomeData`, `renderDreamOutcome`, `DREAM_OUTCOME_ENTRY` (`dream-outcome`).
+- `src/dream/log-pane.ts`: `DreamLogPane`, `showDreamLogPane`.
+- `src/dream/settings.ts`: `persistDreamAutoEnabled`, `projectOverridesDreamEnabled`, `parseDreamSettings`, `parseDreamScope`, `DEFAULT_DREAM_SETTINGS`.
 
 ## Examples
 
-1. **Save a memory** — the agent writes `feedback_x.md` with frontmatter and appends `- [x](feedback_x.md) — hook` to `MEMORY.md`. After each write/edit inside the memory dir, the transcript shows a `✦ memory saved: feedback_x.md` row under the tool row; after the MEMORY.md edit, `✦ memory index updated`. On the next turn the updated index section is already in the system prompt.
-2. **Recall fires on a turn** — user asks "what did I decide about the merge freeze?" The turn blocks briefly on the selector (`deepseek/deepseek-flash`, 512 tokens); a status line `✦ recalled 2 memories` appears, and two `<system-reminder>` blocks (preamble, staleness note if >1 day old, `Memory: <path>:` header, body) arrive as the first user message. The ledger marks them, so after a reload/`fork` they are not re-injected; a compaction resets it.
-3. **Consolidate with `/dream`** — after a week of sessions, run `/dream`: it skips gates 4–7 but takes the lock, spawns the confined child (`deepseek/deepseek-v4-pro`, effort max), reads redacted session excerpts (mains first), and appends `✦ Dream consolidated 3 memory files · $0.12 · 48.2k tok.` — ctrl+o reveals the dream's summary inline; `/dream-log` shows the full history (statuses, reasons, costs); the lock's mtime now blocks idle dreams for 24 h.
-4. **Pause & configure** — `/pause-memory` stops prompt injection and recall for the session (its notice says so). `settings.json` under `"memory"` toggles everything persistently: `"dream": { "enabled": true }` opts into idle dreaming (or `/dream-auto`), `"recall": { "enabled": false }` kills the per-turn selector call, and a project-level `"memory"` block overrides the global one.
+1. Save a memory. The agent writes `feedback_testing.md` with frontmatter and appends a one-line pointer to `MEMORY.md`. The transcript then shows `✦ memory saved: feedback_testing.md` and `✦ memory index updated`. The updated index reaches the system prompt at the next session start or compaction, while the new body reaches the model through recall or a `read`.
+2. Recall on a turn. A question such as "what did we decide about the merge freeze?" sends the candidate list to `deepseek/deepseek-flash` with a 512 token cap. Two matches come back, the footer shows `✦ recalled 2 memories`, and a collapsed row expands to the two `<system-reminder>` blocks. The ledger marks both, so a resume does not inject them again.
+3. Consolidate with `/dream`. After several days of work, `/dream` skips the scheduling gates, takes the lock, and runs the confined child on `deepseek/deepseek-v4-pro` at effort max. It appends `✦ Dream consolidated 3 memory files · $0.12 · 48.2k tok.`, ctrl+o shows the summary, and `/dream-log` shows the history. The lock mtime then blocks idle dreams for 24 hours.
+4. Pause and configure. `/pause-memory` stops prompt injection and recall for the session and resets at the next session start. `"recall": { "enabled": false }` removes the per-turn selector call, and `"dream": { "enabled": true }` or `/dream-auto` turns on idle dreaming. Idle dreaming is off by default.
