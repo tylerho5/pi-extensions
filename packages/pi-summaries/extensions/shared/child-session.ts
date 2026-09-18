@@ -18,7 +18,7 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
   "subagent_check",
   "subagent_list",
   "workflow",
-  "ask_user",
+  "ask_user_question",
   "enter_worktree",
   "exit_worktree",
   "code_review",
