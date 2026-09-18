@@ -1,0 +1,33 @@
+{
+  "name": "@tylerho/pi-ask-user-question",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Claude Code-shaped batch questions: 1-4 per call, each with a header, 2-4 options, optional multi-select and per-option previews.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-ask-user-question"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-ask-user-question",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/ask-user-question"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {
+    "@juicesharp/rpiv-ask-user-question": "^2.10.1"
+  }
+}
