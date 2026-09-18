@@ -32,6 +32,7 @@ import type {
   SubagentEvent,
   SubagentOrigin,
   SubagentMeta,
+  SubagentRunRef,
   SubagentSnapshot,
   SubagentStatus,
   TranscriptItem,
@@ -39,12 +40,13 @@ import type {
 import {
   BackendUnavailableError,
   ConcurrencyLimitError,
+  generateAgentId,
   SendError,
   SpawnError,
-  SUBAGENT_NAME_ERROR,
-  SUBAGENT_NAME_PATTERN,
+  validateSubagentName,
 } from "./domain.ts";
 import { reportRunning } from "../../shared/agent-activity.ts";
+import { runRefKey } from "./result-delivery.ts";
 
 export const MAX_RUNNING = 50;
 // Finished child sessions remain enterable from the task-rail history for the
@@ -64,8 +66,8 @@ function bounded(text: string) {
 
 /**
  * Id slug for extension-generated titles (btw asides): lowercase alphanumerics
- * and hyphens only. Model-chosen names skip this — they are used verbatim as
- * ids after SUBAGENT_NAME_PATTERN validation, matching Claude Code.
+ * and hyphens only. Model-chosen names are used verbatim after validation; an
+ * omitted name gets generateAgentId() instead.
  */
 export function slugifyTitle(title: string) {
   const slug = title
@@ -98,10 +100,11 @@ interface MutableSnapshot {
   id: string;
   origin: SubagentOrigin;
   backend: BackendName;
-  title: string;
+  description: string;
   prompt: string;
   cwd: string;
   status: SubagentStatus;
+  runSequence: number;
   createdAt: number;
   settledAt?: number;
   errorText?: string;
@@ -138,12 +141,16 @@ export interface SubagentReadModel {
   /** Per-subagent notification (takeover view). */
   subscribeTo(id: string, listener: () => void): () => void;
   /** Fire-and-forget: steer/continue a subagent (takeover input). */
-  requestSend(id: string, text: string): void;
+  requestSend(
+    id: string,
+    text: string,
+    onError?: (message: string) => void,
+  ): void;
   /** Fire-and-forget: abort a running subagent (dashboard `x`, takeover). */
   requestAbort(id: string): void;
   /**
-   * Register the settle hook. `consumed` is true when an active
-   * subagent_wait/cancel is collecting the result (so it must not also be
+   * Register the settle hook. `consumed` is true when a foreground
+   * spawn/cancel is collecting the result (so it must not also be
    * delivered as a follow-up message).
    */
   setOnSettled(
@@ -155,15 +162,28 @@ export interface SubagentReadModel {
 
 export interface CancelResult {
   readonly id: string;
-  readonly title: string;
+  readonly description: string;
   readonly status: SubagentStatus;
   readonly cancelled: boolean;
+}
+
+/** Outcome of a send: the run it belongs to, and whether it resumed a settled agent. */
+export interface SendResult {
+  readonly run: SubagentRunRef;
+  readonly restarted: boolean;
+}
+
+/** Spawn-time behavior for the initial run's automatic delivery. */
+export interface SpawnOptions {
+  /** "claimed" registers wait interest for the initial run at spawn time. */
+  readonly resultMode?: "automatic" | "claimed";
 }
 
 export interface SubagentManagerShape {
   spawn(
     backend: BackendName,
     task: SpawnTask,
+    options?: SpawnOptions,
   ): Effect.Effect<
     SubagentSnapshot,
     SpawnError | ConcurrencyLimitError | BackendUnavailableError
@@ -178,11 +198,15 @@ export interface SubagentManagerShape {
     ids: ReadonlyArray<string>,
     onPending?: (pending: string[]) => void,
   ): Effect.Effect<void>;
+  /** Wait for one specific run; releases the caller's claim on exit. */
+  waitForRun(ref: SubagentRunRef): Effect.Effect<void>;
+  /** Release a claimed run without consuming it (aborted foreground wait). */
+  releaseRun(ref: SubagentRunRef): Effect.Effect<void>;
   /** Cancel running subagents; resolves when they have settled. */
   cancel(
     ids: ReadonlyArray<string>,
   ): Effect.Effect<ReadonlyArray<CancelResult>>;
-  send(id: string, text: string): Effect.Effect<void, SendError>;
+  send(id: string, text: string): Effect.Effect<SendResult, SendError>;
   get(id: string): Effect.Effect<SubagentSnapshot | undefined>;
   readonly list: Effect.Effect<ReadonlyArray<SubagentSnapshot>>;
   readonly disposeAll: Effect.Effect<void>;
@@ -210,8 +234,9 @@ const makeManager = Effect.gen(function* () {
   let changeWaiters: Array<() => void> = [];
   const idListeners = new Map<string, Set<() => void>>();
   const cleanups = new Set<Fiber.Fiber<unknown>>();
-  // Ids claimed synchronously at spawn time: two concurrent same-title spawns
-  // must not both pass an entries-map uniqueness check before either inserts.
+  // Ids claimed synchronously at spawn time: two concurrent same-description
+  // spawns must not both pass an entries-map uniqueness check before either
+  // inserts.
   const takenIds = new Set<string>();
   let reserved = 0;
   let disposed = false;
@@ -260,14 +285,28 @@ const makeManager = Effect.gen(function* () {
   // count is unchanged.
   const reportActivity = () => reportRunning("subagents", runningCount());
 
-  const addInterest = (ids: ReadonlyArray<string>) => {
-    for (const id of ids) waitInterest.set(id, (waitInterest.get(id) ?? 0) + 1);
+  const currentRef = (entry: Entry): SubagentRunRef => ({
+    id: entry.snapshot.id,
+    runSequence: entry.snapshot.runSequence,
+  });
+  const hasInterest = (ref: SubagentRunRef) =>
+    (waitInterest.get(runRefKey(ref)) ?? 0) > 0;
+  const isRunPending = (ref: SubagentRunRef) => {
+    const snap = entries.get(ref.id)?.snapshot;
+    return snap?.runSequence === ref.runSequence && snap.status === "running";
   };
-  const releaseInterest = (ids: ReadonlyArray<string>) => {
-    for (const id of ids) {
-      const count = (waitInterest.get(id) ?? 1) - 1;
-      if (count <= 0) waitInterest.delete(id);
-      else waitInterest.set(id, count);
+  const addInterest = (refs: ReadonlyArray<SubagentRunRef>) => {
+    for (const ref of refs) {
+      const key = runRefKey(ref);
+      waitInterest.set(key, (waitInterest.get(key) ?? 0) + 1);
+    }
+  };
+  const releaseInterest = (refs: ReadonlyArray<SubagentRunRef>) => {
+    for (const ref of refs) {
+      const key = runRefKey(ref);
+      const count = (waitInterest.get(key) ?? 1) - 1;
+      if (count <= 0) waitInterest.delete(key);
+      else waitInterest.set(key, count);
     }
   };
 
@@ -278,8 +317,7 @@ const makeManager = Effect.gen(function* () {
     if (entries.size <= MAX_TRACKED) return;
     const candidates = [...entries.values()]
       .filter(
-        (e) =>
-          e.snapshot.status !== "running" && !waitInterest.has(e.snapshot.id),
+        (e) => e.snapshot.status !== "running" && !hasInterest(currentRef(e)),
       )
       .sort(
         (a, b) =>
@@ -334,7 +372,9 @@ const makeManager = Effect.gen(function* () {
     entry.liveToolMap.clear();
     s.liveTools = [];
     s.queued = [];
-    const consumed = (waitInterest.get(s.id) ?? 0) > 0;
+    const runRef = currentRef(entry);
+    const consumed = hasInterest(runRef);
+    waitInterest.delete(runRefKey(runRef));
     notify(s.id);
     try {
       // During teardown, don't queue results into a shutting-down session.
@@ -455,16 +495,26 @@ const makeManager = Effect.gen(function* () {
     notify(s.id);
   };
 
-  const spawn = (backendName: BackendName, task: SpawnTask) =>
+  const spawn = (
+    backendName: BackendName,
+    task: SpawnTask,
+    options?: SpawnOptions,
+  ) =>
     Effect.gen(function* () {
-      // Fail fast on invalid names before reserving a concurrency slot.
-      // Claude Code enforces this shape and uses the name as the id verbatim;
-      // btw titles are extension-generated and slugified instead.
-      if (
-        (task.origin ?? "model") !== "btw" &&
-        !SUBAGENT_NAME_PATTERN.test(task.title)
-      ) {
-        return yield* new SpawnError({ message: SUBAGENT_NAME_ERROR });
+      // Fail fast on invalid supplied names before reserving a concurrency
+      // slot. btw titles are extension-generated and slugified instead.
+      const origin = task.origin ?? "model";
+      if (origin !== "btw" && task.name !== undefined) {
+        const name = task.name;
+        let nameError: string | undefined;
+        try {
+          validateSubagentName(name);
+        } catch (error) {
+          nameError = error instanceof Error ? error.message : String(error);
+        }
+        if (nameError !== undefined) {
+          return yield* new SpawnError({ message: nameError });
+        }
       }
       // Reserve synchronously (before the first yield inside doSpawn) so
       // parallel tool calls cannot race past the global cap.
@@ -510,24 +560,34 @@ const makeManager = Effect.gen(function* () {
           });
         }
 
-        const origin = task.origin ?? "model";
         // Claude Code names agents verbatim: no prefix, no slug. Only
-        // extension-generated titles (btw asides, free-form questions) get
-        // slugified into a valid id shape.
-        const base = origin === "btw" ? slugifyTitle(task.title) : task.title;
+        // extension-generated descriptions (btw asides, free-form questions)
+        // get slugified into an id; an omitted name gets a generated id.
+        const base =
+          origin === "btw"
+            ? slugifyTitle(task.description)
+            : (task.name ?? generateAgentId(task.description));
         let id = base;
         for (let n = 2; takenIds.has(id); n++) id = `${base}-${n}`;
         takenIds.add(id);
-        const meta = yield* session.meta;
+        const meta: SubagentMeta = {
+          ...(yield* session.meta),
+          tier:
+            task.target.source.kind === "tier"
+              ? task.target.source.tier
+              : "explicit",
+          effort: task.reasoningEffort,
+        };
         const entry: Entry = {
           snapshot: {
             id,
             origin,
             backend: backendName,
-            title: task.title,
+            description: task.description,
             prompt: task.prompt,
             cwd: task.cwd,
             status: "running",
+            runSequence: 1,
             createdAt: Date.now(),
             meta,
             usage: { contextWindow: meta.contextWindow },
@@ -542,6 +602,7 @@ const makeManager = Effect.gen(function* () {
           liveToolMap: new Map(),
         };
         entries.set(id, entry);
+        if (options?.resultMode === "claimed") addInterest([currentRef(entry)]);
         reportActivity();
 
         // Pump: fold the event stream into the snapshot. Tied to the entry
@@ -583,12 +644,14 @@ const makeManager = Effect.gen(function* () {
   ) =>
     Effect.suspend(() => {
       const unique = [...new Set(ids)];
-      addInterest(unique);
+      const refs = unique
+        .map((id) => entries.get(id)?.snapshot)
+        .filter((snap): snap is MutableSnapshot => snap !== undefined)
+        .map((snap) => ({ id: snap.id, runSequence: snap.runSequence }));
+      addInterest(refs);
       const loop = Effect.gen(function* () {
         while (true) {
-          const pending = unique.filter(
-            (id) => entries.get(id)?.snapshot.status === "running",
-          );
+          const pending = refs.filter(isRunPending).map((ref) => ref.id);
           if (pending.length === 0) return;
           onPending?.(pending);
           yield* nextChange;
@@ -597,11 +660,27 @@ const makeManager = Effect.gen(function* () {
       return loop.pipe(
         Effect.ensuring(
           Effect.sync(() => {
-            releaseInterest(unique);
+            releaseInterest(refs);
             pruneSettled();
           }),
         ),
       );
+    });
+
+  const waitForRun = (ref: SubagentRunRef) =>
+    Effect.suspend(() => {
+      const loop = Effect.gen(function* () {
+        while (isRunPending(ref)) yield* nextChange;
+      });
+      return loop.pipe(
+        Effect.ensuring(Effect.sync(() => releaseInterest([ref]))),
+      );
+    });
+
+  const releaseRun = (ref: SubagentRunRef) =>
+    Effect.sync(() => {
+      releaseInterest([ref]);
+      pruneSettled();
     });
 
   /** Interrupt one running entry, force-closing its scope after 5s. */
@@ -639,22 +718,23 @@ const makeManager = Effect.gen(function* () {
         .filter(
           (entry): entry is Entry => entry?.snapshot.status === "running",
         );
+      const runningRefs = running.map(currentRef);
       const runningIds = running.map((entry) => entry.snapshot.id);
       // Mark consumed before interrupting so cancellation does not also
       // enqueue duplicate automatic result messages into the parent.
-      addInterest(runningIds);
+      addInterest(runningRefs);
       const work = Effect.gen(function* () {
         yield* Effect.forEach(running, abortEntry, {
           concurrency: "unbounded",
         });
-        while (running.some((entry) => entry.snapshot.status === "running")) {
+        while (runningRefs.some(isRunPending)) {
           yield* nextChange;
         }
       });
       return work.pipe(
         Effect.ensuring(
           Effect.sync(() => {
-            releaseInterest(runningIds);
+            releaseInterest(runningRefs);
             pruneSettled();
           }),
         ),
@@ -663,7 +743,7 @@ const makeManager = Effect.gen(function* () {
             const snapshot = entries.get(id)?.snapshot;
             return {
               id,
-              title: snapshot?.title ?? "?",
+              description: snapshot?.description ?? "?",
               status: snapshot?.status ?? "error",
               cancelled: runningIds.includes(id),
             };
@@ -673,44 +753,58 @@ const makeManager = Effect.gen(function* () {
     });
 
   const send = (id: string, text: string) =>
-    Effect.suspend((): Effect.Effect<void, SendError> => {
+    Effect.suspend((): Effect.Effect<SendResult, SendError> => {
       const entry = entries.get(id);
       if (!entry || disposed) {
         return new SendError({
           message: `Subagent "${id}" is no longer tracked.`,
         });
       }
+      if (entry.snapshot.status === "running") {
+        return entry.session
+          .send(text)
+          .pipe(Effect.as({ run: currentRef(entry), restarted: false }));
+      }
+      if (entry.restarting) {
+        return new SendError({
+          message: `Subagent "${id}" is already restarting; wait for its new run to start before sending again.`,
+        });
+      }
       // Restarting a settled subagent occupies a running slot again, so it
       // must respect the same cap as spawn. Steering an already-running one
       // does not consume additional capacity.
-      if (entry.snapshot.status !== "running") {
-        if (runningCount() + reserved >= MAX_RUNNING) {
-          return new SendError({
-            message: `Max ${MAX_RUNNING} subagents can run concurrently; restarting "${id}" would exceed that.`,
-          });
-        }
-        // Occupy the slot synchronously: the RunStarted that flips status
-        // arrives via the async pump, and two concurrent restarts must not
-        // both pass the check in that window. Cleared by RunStarted/settle,
-        // or here when the backend rejects the send.
-        entry.restarting = true;
-        reportActivity();
-        return entry.session.send(text).pipe(
-          Effect.onError(() =>
-            Effect.sync(() => {
-              entry.restarting = false;
-              reportActivity();
-            }),
-          ),
-        );
+      if (runningCount() + reserved >= MAX_RUNNING) {
+        return new SendError({
+          message: `Max ${MAX_RUNNING} subagents can run concurrently; restarting "${id}" would exceed that.`,
+        });
       }
-      return entry.session.send(text);
+      // Occupy the slot synchronously: the RunStarted that flips status
+      // arrives via the async pump, and two concurrent restarts must not
+      // both pass the check in that window. Cleared by RunStarted/settle,
+      // or here when the backend rejects the send.
+      entry.restarting = true;
+      // A settled resume is a new run: the previous run's interest and
+      // deferred result must not apply to it.
+      entry.snapshot.runSequence += 1;
+      const run = currentRef(entry);
+      reportActivity();
+      return entry.session.send(text).pipe(
+        Effect.onError(() =>
+          Effect.sync(() => {
+            entry.restarting = false;
+            entry.snapshot.runSequence -= 1;
+            reportActivity();
+          }),
+        ),
+        Effect.as({ run, restarted: true }),
+      );
     });
 
   const disposeAll = Effect.gen(function* () {
     disposed = true;
     const all = [...entries.values()];
     entries.clear();
+    waitInterest.clear();
     reportActivity();
     yield* Effect.forEach(
       all,
@@ -752,8 +846,12 @@ const makeManager = Effect.gen(function* () {
         if (set.size === 0) idListeners.delete(id);
       };
     },
-    requestSend: (id, text) => {
-      runDetached(send(id, text).pipe(Effect.ignore));
+    requestSend: (id, text, onError) => {
+      runDetached(
+        send(id, text).pipe(
+          Effect.catch((error) => Effect.sync(() => onError?.(error.message))),
+        ),
+      );
     },
     requestAbort: (id) => {
       const entry = entries.get(id);
@@ -774,6 +872,8 @@ const makeManager = Effect.gen(function* () {
   return SubagentManager.of({
     spawn,
     waitFor,
+    waitForRun,
+    releaseRun,
     cancel,
     send,
     get: (id) => Effect.sync(() => entries.get(id)?.snapshot),

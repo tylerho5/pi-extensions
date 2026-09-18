@@ -30,7 +30,7 @@ export interface SummaryConfig {
 export const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
   enabled: true,
   provider: "deepseek",
-  model: "deepseek-v4-flash",
+  model: "deepseek-flash",
   reasoning: "medium",
 };
 

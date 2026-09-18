@@ -59,7 +59,7 @@ export function takeoverHeader(snap: SubagentSnapshot, theme: Theme): string {
   const cost = formatCost(snap.usage.costUsd);
   return (
     `${statusGlyph(snap, theme)} ` +
-    theme.fg("accent", theme.bold(`${snap.id} · ${snap.title}`)) +
+    theme.fg("accent", theme.bold(`${snap.id} · ${snap.description}`)) +
     theme.fg("muted", ` · ${snap.status} · ${formatElapsed(snap)}`) +
     theme.fg("dim", ` · ${snap.backend}: ${snap.meta.modelLabel ?? "?"}`) +
     (utilization ? theme.fg("dim", ` · ${utilization}`) : "") +
@@ -335,10 +335,10 @@ class SubagentDashboard implements Component {
 
       // Left: marker, status square, title, dim id
       const marker = isSelected ? theme.fg("accent", "❯") : " ";
-      const title = isSelected
-        ? theme.fg("accent", snap.title)
-        : theme.fg("text", snap.title);
-      const left = ` ${marker} ${statusGlyph(snap, theme)} ${title} ${theme.fg("dim", snap.id)}`;
+      const label = isSelected
+        ? theme.fg("accent", snap.description)
+        : theme.fg("text", snap.description);
+      const left = ` ${marker} ${statusGlyph(snap, theme)} ${label} ${theme.fg("dim", snap.id)}`;
 
       // Right: backend · model · context utilization · elapsed · status
       const utilization = formatContextUtilization(snap.usage);
@@ -378,7 +378,7 @@ class SubagentDashboard implements Component {
 
 const TRANSCRIPT_SCROLL_STEP = 6;
 
-class TakeoverView implements Component, Focusable {
+export class TakeoverView implements Component, Focusable {
   private tui: TUI;
   private theme: Theme;
   private keybindings: KeybindingsManager;
@@ -394,6 +394,7 @@ class TakeoverView implements Component, Focusable {
   private ticker: ReturnType<typeof setInterval>;
   private persistedTranscript?: SubagentSnapshot["transcript"];
   private transcriptError?: string;
+  private sendError?: string;
   private loadingTranscript = false;
   // Hidden by default like the main session (hideThinkingBlock); ctrl+t toggles.
   private showThinking = false;
@@ -436,14 +437,20 @@ class TakeoverView implements Component, Focusable {
     // Elapsed time in the header ticks along at 1Hz.
     this.ticker = setInterval(() => this.tui.requestRender(), 1000);
     this.loadFullTranscript();
-    this.input.onSubmit = (value: string) => {
-      const text = value.trim();
-      if (!text) return;
-      this.input.setValue("");
-      this.view.requestSend(this.id, text);
-      this.scrollOffset = 0;
-      this.tui.requestRender();
-    };
+    this.input.onSubmit = (value: string) => this.submit(value);
+  }
+
+  submit(value: string) {
+    const text = value.trim();
+    if (!text) return;
+    this.input.setValue("");
+    this.sendError = undefined;
+    this.view.requestSend(this.id, text, (message) => {
+      this.sendError = message;
+      this.scheduleRender();
+    });
+    this.scrollOffset = 0;
+    this.tui.requestRender();
   }
 
   private snap(): SubagentSnapshot | undefined {
@@ -597,9 +604,13 @@ class TakeoverView implements Component, Focusable {
       { showThinking: this.showThinking, showTools: this.showTools },
     );
     const viewport = this.viewportHeight();
-    const errorRows = snap.errorText ? 1 : 0;
+    const statusRows =
+      (snap.errorText ? 1 : 0) +
+      (this.loadingTranscript ? 1 : 0) +
+      (this.transcriptError ? 1 : 0) +
+      (this.sendError ? 1 : 0);
     const scrollRows = this.scrollOffset > 0 ? 1 : 0;
-    const transcriptCapacity = Math.max(1, viewport - errorRows - scrollRows);
+    const transcriptCapacity = Math.max(1, viewport - statusRows - scrollRows);
     const maxOffset = Math.max(0, transcript.length - transcriptCapacity);
     if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset;
 
@@ -619,6 +630,14 @@ class TakeoverView implements Component, Focusable {
             "warning",
             `full transcript unavailable: ${this.transcriptError}`,
           ),
+          width,
+        ),
+      );
+    }
+    if (this.sendError) {
+      body.push(
+        truncateToWidth(
+          theme.fg("error", `send failed: ${this.sendError}`),
           width,
         ),
       );

@@ -3,14 +3,17 @@
  * (pi, Claude Code) unified behind a single Effect service interface.
  *
  * Tools (for the parent LLM):
- * - subagent_spawn: fire-and-forget spawn (prompt, title, agent, working_dir,
- *   model, reasoning_effort). Max 50 running at once across all backends.
- * - subagent_wait: block until the listed subagents settle, return results.
+ * - subagent_spawn: spawn on a semantic delegation tier (or an explicit
+ *   harness/model/effort override); description, prompt, optional name,
+ *   working_dir, run_in_background, harness, model, reasoning_effort.
+ *   Max 50 running at once across all backends.
  * - subagent_cancel: stop one or more running subagents.
- * - subagent_check: peek at a subagent's status and recent activity.
+ * - subagent_check: non-blocking pull — a settled agent returns its full
+ *   hand-back report, a running one returns status and guidance.
  * - subagent_list: list all subagents.
  *
- * Unawaited subagents queue their result as a follow-up message when they
+ * There is no blocking wait tool: the parent keeps working or ends its turn;
+ * unawaited subagents queue their result as a follow-up message when they
  * settle. `/subagents` opens a picker + full interactive takeover view.
  *
  * Architecture: Effect v4 generators throughout (backends -> manager ->
@@ -18,14 +21,16 @@
  * against one shared ManagedRuntime. pi runs in-process SDK sessions; claude
  * drives the Claude Agent SDK.
  *
- * Both harnesses default to the models set by /subagent-model, and a cost
- * ceiling keeps agent-chosen models off the expensive tier.
+ * Each tier maps to a user-configured harness/model/effort in
+ * shared/subagent-models.json; the cost ceiling (when set) applies only to a
+ * model an agent picked for itself.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type {
+  AgentToolResult,
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
@@ -53,9 +58,11 @@ import {
 import { Type } from "typebox";
 import {
   costCeiling,
-  loadSubagentModels,
-  saveSubagentModels,
-  type SubagentModels,
+  DELEGATION_TIERS,
+  loadDelegationConfig,
+  resolveDelegationTarget,
+  saveDelegationConfig,
+  type DelegationTier,
 } from "../shared/subagent-models.ts";
 import {
   deriveBtwTitle,
@@ -67,41 +74,42 @@ import {
   isDefaultEditorFocused,
 } from "./src/ui/focus.ts";
 import {
-  pickClaudeEffort,
-  pickClaudeModel,
-  pickHarness,
-  pickPiEffort,
-  pickPiModel,
+  pickEffort,
+  pickTierConfig,
+  tierTargetLabel,
 } from "./src/ui/model-picker.ts";
 import {
   BACKEND_NAMES,
-  formatElapsed,
   latestText,
   REASONING_EFFORTS,
+  runRefOf,
+  type SubagentRunRef,
   type SubagentSnapshot,
 } from "./src/domain.ts";
-import { formatContextUtilization } from "./src/format.ts";
 import {
   SubagentManager,
   type SubagentManagerShape,
   type SubagentReadModel,
 } from "./src/manager.ts";
 import {
-  buildSubagentResultMessage,
+  buildSubagentCheckRunningNote,
   buildSubagentSpawnResult,
+  delegationLabel,
+  describeSubagent,
   SUBAGENT_CANCEL_PARAMETER_DESCRIPTIONS,
   SUBAGENT_CANCEL_TOOL_DESCRIPTION,
   SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS,
   SUBAGENT_CHECK_TOOL_DESCRIPTION,
   SUBAGENT_LIST_TOOL_DESCRIPTION,
+  SUBAGENT_SEND_PARAMETER_DESCRIPTIONS,
+  SUBAGENT_SEND_TOOL_DESCRIPTION,
   SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS,
   SUBAGENT_SPAWN_PROMPT_GUIDELINES,
   SUBAGENT_SPAWN_PROMPT_SNIPPET,
   SUBAGENT_SPAWN_TOOL_DESCRIPTION,
-  SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS,
-  SUBAGENT_WAIT_TOOL_DESCRIPTION,
 } from "./src/prompt.ts";
 import { createDeferredResultDelivery } from "./src/result-delivery.ts";
+import { buildHandback } from "./src/handback.ts";
 import {
   createSubagentRuntime,
   runTool,
@@ -116,16 +124,13 @@ import {
 } from "./src/ui/task-rail.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
-const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
-const WAIT_PER_AGENT_MAX_BYTES = 16 * 1024;
-// The follow-up result message keeps only this much of the output in the
-// model's context; the full text renders from details on expand.
-const RESULT_PREVIEW_MAX_BYTES = 2 * 1024;
-const RESULT_PREVIEW_MAX_LINES = 16;
+const TOOL_OUTPUT_MAX_BYTES = 48 * 1024; // total budget for multi-report tool output (cancel)
 
 interface BtwResultData {
   readonly id: string;
-  readonly title: string;
+  readonly description: string;
+  /** Legacy label from before the description rename. */
+  readonly title?: string;
   readonly status: SubagentSnapshot["status"];
   readonly errorText?: string;
   readonly prompt: string;
@@ -135,21 +140,13 @@ interface BtwResultData {
 
 interface SubagentResultDetails {
   readonly id: string;
-  readonly title: string;
+  readonly description: string;
+  /** Legacy label from before the description rename. */
+  readonly title?: string;
   readonly status: SubagentSnapshot["status"];
   readonly errorText?: string;
   readonly fullOutput: string;
   readonly sessionFilePath?: string;
-}
-
-function describeSubagent(snap: SubagentSnapshot) {
-  const details = [
-    `${snap.backend}: ${snap.meta.modelLabel ?? "?"}`,
-    formatContextUtilization(snap.usage),
-    formatElapsed(snap),
-    snap.cwd,
-  ].filter(Boolean);
-  return `${snap.id} [${snap.status}] "${snap.title}" (${details.join(", ")})`;
 }
 
 function truncatedOutput(
@@ -166,6 +163,59 @@ function truncatedOutput(
     text += `\n\n[Output truncated: ${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)} shown. Full transcript in session file: ${snap.meta.sessionFilePath ?? "?"}]`;
   }
   return text;
+}
+
+/** The one unknown/pruned-id error shared by wait, cancel, check, and send. */
+function unknownSubagentError(
+  ids: ReadonlyArray<string>,
+  known: ReadonlyArray<string>,
+): Error {
+  const label =
+    ids.length === 1 ? "Unknown subagent id" : "Unknown subagent ids";
+  return new Error(
+    `${label}: ${ids.join(", ")}. Known: ${known.join(", ") || "none"}.`,
+  );
+}
+
+/** Drop the deferred delivery for the runs whose reports a tool is returning. */
+export function consumeReturnedRuns(
+  delivery: { consume(refs: Iterable<SubagentRunRef>): void },
+  view: { get(id: string): { id: string; runSequence: number } | undefined },
+  ids: ReadonlyArray<string>,
+) {
+  delivery.consume(
+    ids.flatMap((id) => {
+      const snap = view.get(id);
+      return snap ? [runRefOf(snap)] : [];
+    }),
+  );
+}
+
+/** One framed hand-back per subagent, within the total output budget. */
+function subagentOutputSections(
+  view: SubagentReadModel,
+  ids: ReadonlyArray<string>,
+): string[] {
+  const sections: string[] = [];
+  let remainingBytes = TOOL_OUTPUT_MAX_BYTES;
+  for (let index = 0; index < ids.length; index++) {
+    const snap = view.get(ids[index]);
+    if (!snap) continue; // unknown ids are rejected before this runs
+    const section = buildHandback({
+      snapshot: snap,
+      output: snap.finalText,
+    }).modelText;
+    const sectionBytes = Buffer.byteLength(section, "utf8");
+    if (sectionBytes > remainingBytes) {
+      sections.push(
+        `[omitted: total output limit reached; no report for ${ids.slice(index).join(", ")}]`,
+      );
+      break;
+    }
+    sections.push(section);
+    remainingBytes -= sectionBytes;
+  }
+  return sections;
 }
 
 /**
@@ -201,10 +251,6 @@ export default function (pi: ExtensionAPI) {
   // synchronously on setWidget). Used to check focus before grabbing keys.
   let taskRailTui: TUI | undefined;
   let openingTaskRailSession = false;
-  // Timestamp (ms) of the last down-arrow tap while the rail is collapsed;
-  // 0 means no pending tap. The rail opens on a down double-tap.
-  let lastDownTapAt = 0;
-  const DOUBLE_TAP_MS = 500;
   const taskRail = new TaskRailController();
   const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>();
 
@@ -224,29 +270,21 @@ export default function (pi: ExtensionAPI) {
   };
 
   const deliverResult = (snap: SubagentSnapshot) => {
-    const source = snap.finalText || "(no output)";
-    const preview = truncateHead(source, {
-      maxBytes: RESULT_PREVIEW_MAX_BYTES,
-      maxLines: RESULT_PREVIEW_MAX_LINES,
+    const handback = buildHandback({
+      snapshot: snap,
+      output: snap.finalText,
     });
     pi.sendMessage(
       {
         customType: "subagent-result",
-        content: buildSubagentResultMessage({
-          id: snap.id,
-          title: snap.title,
-          status: snap.status,
-          errorText: snap.errorText,
-          preview: preview.content,
-          sizeLabel: formatSize(Buffer.byteLength(source, "utf8")),
-        }),
+        content: handback.modelText,
         display: true,
         details: {
           id: snap.id,
-          title: snap.title,
+          description: snap.description,
           status: snap.status,
           errorText: snap.errorText,
-          fullOutput: truncatedOutput(snap),
+          fullOutput: handback.fullOutput,
           sessionFilePath: snap.meta.sessionFilePath,
         } satisfies SubagentResultDetails,
       },
@@ -264,7 +302,7 @@ export default function (pi: ExtensionAPI) {
     // never enters the model's context or follow-up queue.
     pi.appendEntry<BtwResultData>("btw-result", {
       id: snap.id,
-      title: snap.title,
+      description: snap.description,
       status: snap.status,
       errorText: snap.errorText,
       prompt: snap.prompt,
@@ -275,7 +313,7 @@ export default function (pi: ExtensionAPI) {
     // line fired mid-turn strands mid-transcript as streaming continues.
     if (snap.status === "error")
       ui?.notify(
-        `by the way “${snap.title}” failed — reopen it with /btw`,
+        `by the way “${snap.description}” failed — reopen it with /btw`,
         "error",
       );
   };
@@ -289,11 +327,11 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (consumed) {
-      resultDelivery.consume([snap.id]);
+      resultDelivery.consume([runRefOf(snap)]);
       return;
     }
     // Keep the result retractable while the parent is working. A later
-    // subagent_wait can consume it before agent_settled flushes follow-ups.
+    // subagent_check can consume it before agent_settled flushes follow-ups.
     // Defer a copy: the live snapshot keeps mutating if the subagent is
     // restarted before the deferred result flushes.
     resultDelivery.defer({ ...snap, meta: { ...snap.meta } });
@@ -359,7 +397,7 @@ export default function (pi: ExtensionAPI) {
       // and a down tap inside a modal must not seed a double-tap back in
       // the editor.
       if (!isDefaultEditorView()) {
-        lastDownTapAt = 0;
+        taskRail.clearTap();
         return undefined;
       }
       const view = taskRailView;
@@ -385,11 +423,11 @@ export default function (pi: ExtensionAPI) {
         return { consume: true };
       }
       if (!matchesKey(data, "down")) {
-        lastDownTapAt = 0;
+        taskRail.clearTap();
         return undefined;
       }
       if (taskRail.expanded) {
-        lastDownTapAt = 0;
+        taskRail.clearTap();
         if (visible.length === 0) {
           // Expanded rail with nothing visible (e.g. toggled finished off with
           // no running); the next meaningful state is to show finished again.
@@ -403,16 +441,11 @@ export default function (pi: ExtensionAPI) {
         }
         return { consume: true };
       }
-      // Collapsed: open on a down double-tap within DOUBLE_TAP_MS. Swallow
-      // the first tap so it doesn't fall through to the editor. Held-key
-      // repeats are not taps — consume them without counting.
+      // Collapsed: open on a down double-tap within the controller's window.
+      // A lone tap reaches normal editor navigation; a held-key repeat is
+      // neither a tap nor an editor move.
       if (isKeyRepeat(data)) return { consume: true };
-      const now = Date.now();
-      const doubleTap = now - lastDownTapAt <= DOUBLE_TAP_MS;
-      lastDownTapAt = now;
-      if (!doubleTap) return { consume: true };
-      lastDownTapAt = 0;
-      taskRail.toggleExpanded();
+      if (!taskRail.handleCollapsedDown(Date.now())) return undefined;
       // No running subagents: open straight to the finished list so the
       // down-twice gesture lands on real content instead of an empty rail.
       if (totalRunning === 0 && totalFinished > 0) taskRail.revealFinished();
@@ -444,18 +477,36 @@ export default function (pi: ExtensionAPI) {
   // --- Tools -------------------------------------------------------------
 
   const spawnParameters = Type.Object({
+    description: Type.String({
+      maxLength: 200,
+      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.description,
+    }),
     prompt: Type.String({
       description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.prompt,
     }),
-    name: Type.String({
-      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
-    }),
-    harness: StringEnum(BACKEND_NAMES, {
-      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
-    }),
+    name: Type.Optional(
+      Type.String({
+        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
+      }),
+    ),
+    tier: Type.Optional(
+      StringEnum(DELEGATION_TIERS, {
+        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.tier,
+      }),
+    ),
     working_dir: Type.Optional(
       Type.String({
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.workingDir,
+      }),
+    ),
+    run_in_background: Type.Optional(
+      Type.Boolean({
+        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.runInBackground,
+      }),
+    ),
+    harness: Type.Optional(
+      StringEnum(BACKEND_NAMES, {
+        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
       }),
     ),
     model: Type.Optional(
@@ -472,10 +523,12 @@ export default function (pi: ExtensionAPI) {
 
   interface SpawnDetails {
     id: string;
-    title: string;
+    description: string;
     cwd: string;
     harness: string;
+    tier: DelegationTier | "explicit";
     model: string | undefined;
+    effort: string;
   }
 
   pi.registerTool<typeof spawnParameters, SpawnDetails>({
@@ -487,63 +540,117 @@ export default function (pi: ExtensionAPI) {
     parameters: spawnParameters,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const manager = await getManager();
-      const harness = params.harness;
+      const target = resolveDelegationTarget({
+        config: loadDelegationConfig(),
+        selection: {
+          tier: params.tier,
+          harness: params.harness,
+          model: params.model,
+          effort: params.reasoning_effort,
+        },
+        supportedHarnesses: BACKEND_NAMES,
+      });
 
       const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
         throw new Error(`working_dir is not a directory: ${cwd}`);
       }
 
-      const title = params.name.trim() || "subagent";
+      const background = params.run_in_background !== false;
       const snap = await runTool(
         getRuntime(),
-        manager.spawn(harness, {
-          prompt: params.prompt,
-          title,
-          cwd,
-          model: params.model,
-          reasoningEffort: params.reasoning_effort,
-          parent: {
-            parentCwd: ctx.cwd,
-            projectTrusted: resolveChildProjectTrust({
+        manager.spawn(
+          target.harness,
+          {
+            prompt: params.prompt,
+            description: params.description,
+            name: params.name,
+            cwd,
+            target,
+            model:
+              target.harness === "claude"
+                ? target.model
+                : target.provider
+                  ? `${target.provider}/${target.model}`
+                  : target.model,
+            reasoningEffort: target.effort,
+            parent: {
               parentCwd: ctx.cwd,
-              childCwd: cwd,
-              parentTrusted: ctx.isProjectTrusted(),
-            }),
-            modelRegistry: ctx.modelRegistry,
+              projectTrusted: resolveChildProjectTrust({
+                parentCwd: ctx.cwd,
+                childCwd: cwd,
+                parentTrusted: ctx.isProjectTrusted(),
+              }),
+              modelRegistry: ctx.modelRegistry,
+            },
           },
-        }),
+          { resultMode: background ? "automatic" : "claimed" },
+        ),
         { signal, interruptMessage: "Subagent spawn aborted." },
       );
 
+      const tier = snap.meta.tier ?? "explicit";
+      const header = buildSubagentSpawnResult({
+        id: snap.id,
+        description: snap.description,
+        tier,
+        harness: snap.backend,
+        modelLabel: snap.meta.modelLabel ?? "?",
+        effort: target.effort,
+        background,
+      });
+      const details: SpawnDetails = {
+        id: snap.id,
+        description: snap.description,
+        cwd,
+        harness: snap.backend,
+        tier,
+        model: snap.meta.modelLabel,
+        effort: target.effort,
+      };
+
+      if (background) {
+        return {
+          content: [{ type: "text", text: header }],
+          details,
+        };
+      }
+
+      // Foreground: the initial run is claimed at spawn, so no automatic
+      // follow-up is queued. Wait for that run, then return its hand-back; if
+      // the wait aborts, release the claim and leave the child running.
+      const run = runRefOf(snap);
+      try {
+        await runTool(getRuntime(), manager.waitForRun(run), {
+          signal,
+          interruptMessage: "Wait aborted. Subagent keeps running.",
+        });
+      } catch (error) {
+        await runTool(getRuntime(), manager.releaseRun(run)).catch(
+          () => undefined,
+        );
+        throw error;
+      }
+      const settled = manager.view.get(snap.id) ?? snap;
+      const handback = buildHandback({
+        snapshot: settled,
+        output: settled.finalText,
+      });
       return {
-        content: [
-          {
-            type: "text",
-            text: buildSubagentSpawnResult({
-              id: snap.id,
-              title: snap.title,
-              harness,
-              modelLabel: snap.meta.modelLabel ?? "?",
-              cwd,
-            }),
-          },
-        ],
-        details: {
-          id: snap.id,
-          title: snap.title,
-          cwd,
-          harness,
-          model: snap.meta.modelLabel,
-        },
+        content: [{ type: "text", text: `${header}\n\n${handback.modelText}` }],
+        details,
       };
     },
     renderCall(args, theme, context) {
       const text =
         (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       let content = theme.fg("toolTitle", theme.bold("subagent_spawn"));
-      if (args.name) content += " " + theme.fg("dim", `"${args.name}"`);
-      if (args.harness) content += " " + theme.fg("muted", `· ${args.harness}`);
+      if (args.description)
+        content += " " + theme.fg("dim", `"${args.description}"`);
+      if (args.name) content += " " + theme.fg("muted", `· ${args.name}`);
+      if (args.tier) content += " " + theme.fg("muted", `· ${args.tier}`);
+      else if (args.harness)
+        content += " " + theme.fg("muted", `· ${args.harness}`);
       text.setText(content);
       return text;
     },
@@ -559,7 +666,10 @@ export default function (pi: ExtensionAPI) {
       let text =
         theme.fg("success", "⏵ ") +
         theme.fg("accent", d.id) +
-        theme.fg("dim", ` · ${d.harness} · ${d.model ?? "?"}`);
+        theme.fg(
+          "dim",
+          ` · ${delegationLabel(d.tier)} · ${d.harness} · ${d.model ?? "?"}`,
+        );
       if (expanded) {
         text += "\n" + theme.fg("dim", `  cwd: ${d.cwd}`);
       } else {
@@ -569,105 +679,6 @@ export default function (pi: ExtensionAPI) {
         );
       }
       return new Text(text, 0, 0);
-    },
-  });
-
-  pi.registerTool({
-    name: "subagent_wait",
-    label: "Wait for Subagents",
-    description: SUBAGENT_WAIT_TOOL_DESCRIPTION,
-    parameters: Type.Object({
-      ids: Type.Array(Type.String(), {
-        maxItems: 64,
-        description: SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS.ids,
-      }),
-    }),
-    async execute(_toolCallId, params, signal, onUpdate) {
-      const manager = await getManager();
-      const ids = [...new Set(params.ids)];
-      if (ids.length === 0)
-        throw new Error("Provide at least one subagent id.");
-      const known = manager.view
-        .list()
-        .filter(isModelVisible)
-        .map((snap) => snap.id);
-      const unknown = ids.filter((id) => {
-        const snap = manager.view.get(id);
-        return !snap || !isModelVisible(snap);
-      });
-      if (unknown.length > 0) {
-        throw new Error(
-          `Unknown subagent id(s): ${unknown.join(", ")}. Known: ${known.join(", ") || "none"}.`,
-        );
-      }
-
-      await runTool(
-        getRuntime(),
-        manager.waitFor(ids, (pending) => {
-          onUpdate?.({
-            content: [
-              { type: "text", text: `Waiting for ${pending.join(", ")}...` },
-            ],
-            details: { pending },
-          });
-        }),
-        { signal, interruptMessage: "Wait aborted. Subagents keep running." },
-      );
-
-      // Settlement may have happened before this wait began. Remove any
-      // deferred automatic delivery now that the tool is returning the result.
-      resultDelivery.consume(ids);
-
-      const sections: string[] = [];
-      let remainingBytes = WAIT_OUTPUT_MAX_BYTES;
-      for (const id of ids) {
-        const snap = manager.view.get(id);
-        if (!snap) {
-          sections.push(`## ${id}\n\n(no longer tracked)`);
-          continue;
-        }
-        const verb =
-          snap.status === "error"
-            ? "failed"
-            : snap.status === "cancelled"
-              ? "cancelled"
-              : "finished";
-        let section = `## ${snap.id} "${snap.title}" ${verb}`;
-        if (snap.errorText) section += `\nError: ${snap.errorText}`;
-        const headerBytes = Buffer.byteLength(section, "utf8") + 2;
-        const outputBudget = Math.max(
-          512,
-          Math.min(WAIT_PER_AGENT_MAX_BYTES, remainingBytes - headerBytes),
-        );
-        section += `\n\n${truncatedOutput(snap, outputBudget)}`;
-        const sectionBytes = Buffer.byteLength(section, "utf8");
-        if (sectionBytes > remainingBytes) {
-          sections.push(
-            `## ${snap.id} "${snap.title}"\n\n[omitted: total wait output limit reached]`,
-          );
-          break;
-        }
-        sections.push(section);
-        remainingBytes -= sectionBytes;
-      }
-
-      const combined = sections.join("\n\n---\n\n");
-      const bounded = truncateHead(combined, {
-        maxBytes: WAIT_OUTPUT_MAX_BYTES - 128,
-        maxLines: DEFAULT_MAX_LINES,
-      });
-      const text = bounded.truncated
-        ? `${bounded.content}\n\n[wait output truncated at the total output limit]`
-        : bounded.content;
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          results: ids.map((id) => {
-            const snap = manager.view.get(id);
-            return { id, title: snap?.title, status: snap?.status };
-          }),
-        },
-      };
     },
   });
 
@@ -694,35 +705,92 @@ export default function (pi: ExtensionAPI) {
         const snap = manager.view.get(id);
         return !snap || !isModelVisible(snap);
       });
-      if (unknown.length > 0) {
-        throw new Error(
-          `Unknown subagent id(s): ${unknown.join(", ")}. Known: ${known.join(", ") || "none"}.`,
-        );
-      }
+      if (unknown.length > 0) throw unknownSubagentError(unknown, known);
 
       const report = await runTool(getRuntime(), manager.cancel(ids), {
         signal,
         interruptMessage: "Subagent cancellation aborted.",
       });
+      // The report covers each listed run, settled or just cancelled; drop any
+      // deferred copy so it is not delivered again as a follow-up.
+      consumeReturnedRuns(resultDelivery, manager.view, ids);
 
       const lines = report.map((entry) =>
         entry.cancelled
-          ? `Cancelled ${entry.id} "${entry.title}".`
-          : `${entry.id} "${entry.title}" was already ${entry.status}.`,
+          ? `Cancelled ${entry.id} "${entry.description}".`
+          : `${entry.id} "${entry.description}" was already ${entry.status}.`,
       );
+      const sections = subagentOutputSections(manager.view, ids);
 
       return {
-        content: [{ type: "text", text: lines.join("\n") }],
+        content: [
+          { type: "text", text: [lines.join("\n"), ...sections].join("\n\n") },
+        ],
         details: {
           results: report.map((entry) => ({
             id: entry.id,
-            title: entry.title,
+            description: entry.description,
             status: entry.status,
           })),
         },
       };
     },
   });
+
+  pi.registerTool({
+    name: "subagent_send",
+    label: "Send to Subagent",
+    description: SUBAGENT_SEND_TOOL_DESCRIPTION,
+    parameters: Type.Object({
+      id: Type.String({
+        description: SUBAGENT_SEND_PARAMETER_DESCRIPTIONS.id,
+      }),
+      message: Type.String({
+        description: SUBAGENT_SEND_PARAMETER_DESCRIPTIONS.message,
+      }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const manager = await getManager();
+      const snap = manager.view.get(params.id);
+      if (!snap || !isModelVisible(snap)) {
+        const known = manager.view
+          .list()
+          .filter(isModelVisible)
+          .map((s) => s.id);
+        throw unknownSubagentError([params.id], known);
+      }
+      const result = await runTool(
+        getRuntime(),
+        manager.send(params.id, params.message),
+        { signal, interruptMessage: "Send aborted." },
+      );
+      const verb = result.restarted ? "Resumed" : "Steered";
+      const tail = result.restarted
+        ? " The result arrives the same way as a spawn."
+        : "";
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${verb} ${params.id} (run ${result.run.runSequence}).${tail}`,
+          },
+        ],
+        details: {
+          id: params.id,
+          runSequence: result.run.runSequence,
+          restarted: result.restarted,
+        },
+      };
+    },
+  });
+
+  interface CheckDetails {
+    id: string;
+    description: string;
+    status: SubagentSnapshot["status"];
+    turns: number;
+    tier: DelegationTier | "explicit" | undefined;
+  }
 
   pi.registerTool({
     name: "subagent_check",
@@ -733,7 +801,7 @@ export default function (pi: ExtensionAPI) {
         description: SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS.id,
       }),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params): Promise<AgentToolResult<CheckDetails>> {
       const manager = await getManager();
       const snap = manager.view.get(params.id);
       if (!snap || !isModelVisible(snap)) {
@@ -741,9 +809,28 @@ export default function (pi: ExtensionAPI) {
           .list()
           .filter(isModelVisible)
           .map((s) => s.id);
-        throw new Error(
-          `Unknown subagent id "${params.id}". Known: ${known.join(", ") || "none"}.`,
-        );
+        throw unknownSubagentError([params.id], known);
+      }
+
+      if (snap.status !== "running") {
+        // The report renders from the retained snapshot, so this is safe even
+        // after the follow-up already flushed; consuming is idempotent and
+        // prevents a second automatic delivery for a run checked on demand.
+        consumeReturnedRuns(resultDelivery, manager.view, [snap.id]);
+        const handback = buildHandback({
+          snapshot: snap,
+          output: snap.finalText,
+        });
+        return {
+          content: [{ type: "text", text: handback.modelText }],
+          details: {
+            id: snap.id,
+            description: snap.description,
+            status: snap.status,
+            turns: snap.turns,
+            tier: snap.meta.tier,
+          },
+        };
       }
 
       let text = `${describeSubagent(snap)}\nTurns: ${snap.turns}`;
@@ -754,13 +841,20 @@ export default function (pi: ExtensionAPI) {
         const preview = truncateHead(output, { maxBytes: 2048, maxLines: 20 });
         text += `\n\nLatest output:\n${preview.content}`;
         if (preview.truncated) text += "\n[...]";
-      } else if (snap.status === "running") {
+      } else {
         text += "\n\n(no text output yet)";
       }
+      text += `\n\n${buildSubagentCheckRunningNote(snap)}`;
 
       return {
         content: [{ type: "text", text }],
-        details: { id: snap.id, status: snap.status, turns: snap.turns },
+        details: {
+          id: snap.id,
+          description: snap.description,
+          status: snap.status,
+          turns: snap.turns,
+          tier: snap.meta.tier,
+        },
       };
     },
   });
@@ -782,9 +876,10 @@ export default function (pi: ExtensionAPI) {
         details: {
           subagents: subs.map((snap) => ({
             id: snap.id,
-            title: snap.title,
+            description: snap.description,
             harness: snap.backend,
             status: snap.status,
+            tier: snap.meta.tier,
           })),
         },
       };
@@ -809,27 +904,28 @@ export default function (pi: ExtensionAPI) {
         theme.fg("accent", theme.bold(`subagent ${details.id ?? "?"}`)) +
         theme.fg(
           "muted",
-          ` · ${details.title ?? ""} · ${cancelled ? "cancelled" : failed ? "failed" : "finished"}`,
+          ` · ${details.description ?? details.title ?? ""} · ${cancelled ? "cancelled" : failed ? "failed" : "finished"}`,
         );
 
       const content =
         typeof message.content === "string" ? message.content : "";
-      // Remove the summary line and the model-facing pointer line ("[Preview of
-      // the …]"). The following Error line (when present) is part of the
-      // actual result and must remain visible.
-      const body = content
+      // The framed report lives in details; entries written before that split
+      // fall back to the content body (summary line and old preview pointer
+      // removed — the Error line stays, it is part of the result).
+      const contentBody = content
         .split("\n")
         .slice(1)
         .filter((line) => !line.startsWith("[Preview of the "))
         .join("\n")
         .trim();
+      const body = (details.fullOutput ?? contentBody).trim();
 
       if (expanded) {
         // The full output lives in details so it never enters the model
         // context; entries persisted before that split fall back to the body.
         const full = [
           details.errorText ? `Error: ${details.errorText}` : "",
-          details.fullOutput ?? body,
+          body,
         ]
           .filter(Boolean)
           .join("\n\n");
@@ -870,7 +966,10 @@ export default function (pi: ExtensionAPI) {
           : theme.fg("success", "■");
       const header =
         `${icon} ` +
-        theme.fg("accent", theme.bold(`by the way · ${data?.title ?? "?"}`)) +
+        theme.fg(
+          "accent",
+          theme.bold(`by the way · ${data?.description ?? data?.title ?? "?"}`),
+        ) +
         theme.fg(
           "muted",
           ` · ${cancelled ? "cancelled" : failed ? "failed" : "answered"} · ${data?.id ?? "?"}`,
@@ -945,7 +1044,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const title = deriveBtwTitle(prompt);
+      const description = deriveBtwTitle(prompt);
       // Snapshot the parent conversation at spawn time. The snapshot is
       // synchronous (two adjacent reads, no awaits between them) and entries
       // are append-only, so it is race-free even while the parent is
@@ -964,8 +1063,13 @@ export default function (pi: ExtensionAPI) {
             // The child has no tools (see backends/pi.ts noTools); the prefix
             // keeps it from reasoning about tool use it cannot perform.
             prompt: `${BTW_PROMPT_PREFIX}\n\n${prompt}`,
-            title,
+            description,
             cwd: ctx.cwd,
+            target: resolveDelegationTarget({
+              config: loadDelegationConfig(),
+              selection: {},
+              supportedHarnesses: ["pi"],
+            }),
             parent: {
               parentCwd: ctx.cwd,
               projectTrusted: ctx.isProjectTrusted(),
@@ -1022,7 +1126,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("subagent-model", {
     description:
-      "Choose the default model and effort for each subagent harness",
+      "Choose the default model and effort for each subagent delegation tier",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") {
         if (ctx.hasUI)
@@ -1033,40 +1137,30 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const current = loadSubagentModels();
-      const harness = await pickHarness(ctx, current);
-      if (!harness) return;
-
-      let updated: SubagentModels;
-      if (harness === "pi") {
-        const model = await pickPiModel(ctx);
-        if (!model) return;
-        const effort = await pickPiEffort(ctx, model, current.pi.effort);
-        if (!effort) return;
-        updated = {
-          ...current,
-          pi: { provider: model.provider, model: model.id, effort },
-        };
-      } else {
-        const model = await pickClaudeModel(ctx);
-        if (!model) return;
-        const effort = await pickClaudeEffort(ctx);
-        if (!effort) return;
-        updated = { ...current, claude: { model, effort } };
-      }
+      const result = await pickTierConfig({
+        config: loadDelegationConfig(),
+        cwd: ctx.cwd,
+        models: ctx.modelRegistry.getAvailable(),
+        ceiling: costCeiling(),
+        ui: {
+          select: (title, options) => ctx.ui.select(title, [...options]),
+          pickEffort: (options, current) => pickEffort(ctx, options, current),
+          notify: (message, type) => ctx.ui.notify(message, type),
+        },
+      });
+      if (!result) return;
 
       try {
-        await saveSubagentModels(updated);
+        await saveDelegationConfig(result.config);
       } catch {
         ctx.ui.notify("Could not save the subagent model defaults.", "error");
         return;
       }
 
-      const chosen =
-        harness === "pi"
-          ? `${updated.pi.provider}/${updated.pi.model} · ${updated.pi.effort}`
-          : `${updated.claude.model} · ${updated.claude.effort}`;
-      ctx.ui.notify(`Default ${harness} subagent: ${chosen}`, "info");
+      ctx.ui.notify(
+        `${result.tier} → ${tierTargetLabel(result.config, result.tier)}`,
+        "info",
+      );
     },
   });
 
@@ -1106,8 +1200,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       try {
-        await saveSubagentModels({
-          ...loadSubagentModels(),
+        await saveDelegationConfig({
+          ...loadDelegationConfig(),
           costCeiling: ceiling,
         });
       } catch {

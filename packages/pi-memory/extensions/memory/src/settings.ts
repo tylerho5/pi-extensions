@@ -6,7 +6,7 @@
  *   "memory": {
  *     "enabled": true,
  *     "promptVariant": "auto",
- *     "recall": { "enabled": true, "provider": "deepseek", "model": "deepseek-v4-flash", "reasoning": "off" }
+ *     "recall": { "enabled": true, "provider": "deepseek", "model": "deepseek-flash", "reasoning": "off" }
  *   }
  *
  * `PI_DISABLE_AUTO_MEMORY` mirrors Claude Code's
@@ -57,7 +57,7 @@ export interface MemorySettings {
 export const DEFAULT_RECALL_SETTINGS: RecallSettings = {
   enabled: true,
   provider: "deepseek",
-  model: "deepseek-v4-flash",
+  model: "deepseek-flash",
   reasoning: "off",
 };
 

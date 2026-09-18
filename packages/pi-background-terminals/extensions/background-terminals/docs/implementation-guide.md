@@ -647,8 +647,9 @@ Keep a `Map<string, number> killInterest` in the manager; `kill()` adds interest
 signaling and releases in `Effect.ensuring` (identical to `addInterest`/`releaseInterest`).
 `settle` computes `consumed = (killInterest.get(id) ?? 0) > 0`. Additionally, `bg_kill`'s tool
 handler calls `resultDelivery.consume(ids)` after `runTool` returns, mirroring
-`subagent_wait`'s "settlement may have happened before this wait began" comment (index.ts
-line 352) — belt and suspenders for the settled-before-kill-started ordering.
+`subagent_check`'s "consuming is idempotent and prevents a second automatic
+delivery" pattern (index.ts, `consumeReturnedRuns`) — belt and suspenders for
+the settled-before-kill-started ordering.
 
 ### 9.4 Result message content
 

@@ -9,6 +9,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { formatContextUtilization } from "../shared/context-utilization.ts";
+import type { DelegationTier, Effort } from "../shared/subagent-models.ts";
 import { safeStringify } from "./serialization.ts";
 
 export type Theme = ExtensionContext["ui"]["theme"];
@@ -67,8 +68,12 @@ export interface AgentRecord {
   state: AgentState;
   model?: string;
   /** Name the script asked for when it differed from the resolved model
-   * (e.g. a CC alias like "sonnet" mapped via modelAliases). */
+   * (a delegation tier, or a CC alias mapped via modelAliases). */
   requestedModel?: string;
+  /** Delegation tier the script selected, when it used one. */
+  tier?: DelegationTier;
+  /** Resolved effort: the tier's effort, an explicit one, or the parent's. */
+  effort?: Effort;
   /** Context capacity of the active model used for this agent. */
   contextWindow?: number;
   startedAt: number;

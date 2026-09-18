@@ -7,7 +7,7 @@
  * HTML→markdown extraction → Jina reader fallback when the direct path fails,
  * is bot-blocked, returns binary content, or extracts to almost nothing →
  * optionally, a cheap "apply" model answers the caller's prompt against the
- * content (CC's second-round-trip design; default deepseek-v4-flash,
+ * content (CC's second-round-trip design; default deepseek-flash,
  * configurable via /web-fetch-model).
  *
  * Cross-host redirects are NOT followed; the tool returns a REDIRECT DETECTED

@@ -287,6 +287,12 @@ function resultContextWindow(result: SDKResultMessage) {
   return Object.values(result.modelUsage)[0]?.contextWindow;
 }
 
+/** Positive delta between a run's cumulative session cost and the last total reported. */
+export function costDelta(previousTotalUsd: number, reportedTotalUsd: number) {
+  const delta = reportedTotalUsd - previousTotalUsd;
+  return delta > 0 ? delta : 0;
+}
+
 function waitBounded(operation: Promise<unknown>, timeoutMs: number) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
@@ -315,6 +321,13 @@ const makeClaudeSession = (
   task: SpawnTask,
 ): Effect.Effect<SubagentSession, SpawnError, Scope.Scope> =>
   Effect.gen(function* () {
+    const target = task.target;
+    if (target.harness !== "claude") {
+      return yield* new SpawnError({
+        message: `The claude backend cannot run a "${target.harness}" target.`,
+      });
+    }
+
     const model = yield* Effect.try({
       try: () => resolveClaudeModel(task),
       catch: (error) => new SpawnError({ message: boundedError(error) }),
@@ -340,6 +353,8 @@ const makeClaudeSession = (
       liveText: "",
       tools: new Map<string, string>(),
       settleWaiters: new Set<() => void>(),
+      /** Cumulative session spend already published to addChildCost(). */
+      lastReportedCostUsd: 0,
       meta: {
         backend: "claude",
         modelLabel: model,
@@ -489,7 +504,12 @@ const makeClaudeSession = (
     };
 
     const handleResult = (result: SDKResultMessage) => {
-      addChildCost("subagents", result.total_cost_usd ?? 0);
+      const reportedTotal = result.total_cost_usd;
+      if (reportedTotal !== undefined) {
+        const delta = costDelta(state.lastReportedCostUsd, reportedTotal);
+        if (delta > 0) addChildCost("subagents", delta);
+        state.lastReportedCostUsd = reportedTotal;
+      }
       // result.usage is a whole-run aggregate, not occupancy (see
       // contextOccupancyTokens); only the capacity is trustworthy here. The
       // occupancy itself was already emitted by the last assistant message.

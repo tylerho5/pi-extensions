@@ -3,15 +3,19 @@
  *
  * Everything downstream of a backend (manager, tools, UI) speaks only these
  * types. Backends translate their native streams (pi session events, Claude
- * Agent SDK messages, Codex app-server JSON-RPC notifications) into the
- * normalized `SubagentEvent` union.
+ * Agent SDK messages) into the normalized `SubagentEvent` union.
  */
 
+import { randomBytes } from "node:crypto";
 import type {
   ModelRegistry,
   SessionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Data } from "effect";
+import type {
+  DelegationTier,
+  ResolvedDelegationTarget,
+} from "../../shared/subagent-models.ts";
 
 export const BACKEND_NAMES = ["pi", "claude"] as const;
 export type BackendName = (typeof BACKEND_NAMES)[number];
@@ -27,14 +31,54 @@ export const SUBAGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 export const SUBAGENT_NAME_ERROR =
   "name must start with a letter or digit and contain only letters, digits, underscores, or hyphens (max 64 chars)";
 
+/** Rejection message for reserved names and generated-id shapes. */
+export const SUBAGENT_NAME_RESERVED_ERROR =
+  'name must not be a reserved recipient ("main" or "team-lead", in any spelling) or have the shape of an agent id — those already address an agent directly';
+
+const RESERVED_SUBAGENT_NAMES = new Set(["main", "team-lead"]);
+
+const AGENT_ID_SLUG_PATTERN = /^[\w-]{1,63}$/;
+const AGENT_ID_PATTERN = /^a(?:[\w-]{1,63}-)?[0-9a-f]{16}$/;
+
+/** Claude Code's name comparison key: NFKC, control-char strip, trim, lowercase, whitespace -> hyphen. */
+function normalizeSubagentName(name: string) {
+  return name
+    .normalize("NFKC")
+    .replace(/[\p{Cc}\p{Cf}]/gu, (char) => (/\s/.test(char) ? char : ""))
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+}
+
+/** Throws when a supplied name fails Claude Code's shape, reserved, or id-shape rules. */
+export function validateSubagentName(name: string): void {
+  if (!SUBAGENT_NAME_PATTERN.test(name)) throw new Error(SUBAGENT_NAME_ERROR);
+  const normalized = normalizeSubagentName(name);
+  if (
+    RESERVED_SUBAGENT_NAMES.has(normalized) ||
+    AGENT_ID_PATTERN.test(normalized)
+  ) {
+    throw new Error(SUBAGENT_NAME_RESERVED_ERROR);
+  }
+}
+
+/** Claude Code's generated id: `a<description-slug>-<16 hex>`, or `a<16 hex>` when the slug is empty. */
+export function generateAgentId(description: string): string {
+  const normalized = normalizeSubagentName(description);
+  const slug = AGENT_ID_SLUG_PATTERN.test(normalized)
+    ? normalized
+    : normalized.replace(/[^\w-]/g, "").slice(0, 63);
+  const suffix = randomBytes(8).toString("hex");
+  return slug ? `a${slug}-${suffix}` : `a${suffix}`;
+}
+
 /** Who initiated the session. User asides stay out of model-facing tooling. */
 export type SubagentOrigin = "model" | "btw";
 
 /**
  * Shared reasoning-effort scale (pi's thinking levels). Each backend maps a
- * value to its nearest native equivalent: pi uses it directly, codex
- * translates to its reasoning-effort slugs, claude translates to thinking
- * budgets. Omitted = backend default (pi inherits the parent level).
+ * value to its nearest native equivalent: pi uses it directly and claude
+ * translates it to a thinking budget.
  */
 export const REASONING_EFFORTS = [
   "off",
@@ -66,14 +110,16 @@ export interface ParentContext {
 export interface SpawnTask {
   /** Omitted for normal tool-driven spawns. */
   readonly origin?: SubagentOrigin;
+  /** Self-contained task prompt; the child cannot see the parent conversation. */
   readonly prompt: string;
-  readonly title: string;
+  /** Short model-chosen task label, 3-5 words. */
+  readonly description: string;
+  /** Optional model-chosen id source. Used verbatim after validation. */
+  readonly name?: string;
   readonly cwd: string;
-  /**
-   * Generic model hint, interpreted per backend:
-   * pi: "provider/model-id" or bare model id; claude: model alias;
-   * codex: model slug. Omitted = backend default / inherit.
-   */
+  /** Resolved delegation target: one fixed tier, or an explicit harness/model/effort. */
+  readonly target: ResolvedDelegationTarget;
+  /** Effective model hint for backends that take one (claude aliases, the stub). */
   readonly model?: string;
   /** Shared effort scale; each backend maps it to its native equivalent. */
   readonly reasoningEffort?: ReasoningEffort;
@@ -82,13 +128,17 @@ export interface SpawnTask {
 
 export interface SubagentMeta {
   readonly backend: BackendName;
-  /** Display label, e.g. "anthropic/claude-opus-4-5" or "gpt-5-codex". */
+  /** Tier the target resolved from, or "explicit" for a named harness/model/effort. */
+  readonly tier?: DelegationTier | "explicit";
+  /** Display label, e.g. "anthropic/claude-opus-4-5". */
   readonly modelLabel?: string;
+  /** Resolved reasoning effort, for the status line and hand-back wrapper. */
+  readonly effort?: ReasoningEffort;
   /** Context window capacity for utilization display, when known. */
   readonly contextWindow?: number;
-  /** pi session file / Claude projects JSONL / Codex rollout path. */
+  /** pi session file or Claude projects JSONL path. */
   readonly sessionFilePath?: string;
-  /** Claude session id / Codex conversation id. */
+  /** Claude session id. */
   readonly nativeSessionId?: string;
 }
 
@@ -226,10 +276,12 @@ export interface SubagentSnapshot {
   readonly id: string;
   readonly origin: SubagentOrigin;
   readonly backend: BackendName;
-  readonly title: string;
+  readonly description: string;
   readonly prompt: string;
   readonly cwd: string;
   readonly status: SubagentStatus;
+  /** 1-based run counter; a settled agent resumed via send starts a new run. */
+  readonly runSequence: number;
   readonly createdAt: number;
   readonly settledAt?: number;
   readonly errorText?: string;
@@ -244,6 +296,19 @@ export interface SubagentSnapshot {
   readonly finalText: string;
   /** Count of finalized assistant messages (for subagent_check). */
   readonly turns: number;
+}
+
+/** One run of one subagent: the id plus the run sequence it settled under. */
+export interface SubagentRunRef {
+  readonly id: string;
+  readonly runSequence: number;
+}
+
+/** The run ref for a snapshot's current (or last settled) run. */
+export function runRefOf(
+  snap: Pick<SubagentSnapshot, "id" | "runSequence">,
+): SubagentRunRef {
+  return { id: snap.id, runSequence: snap.runSequence };
 }
 
 /** Final text, or the live streaming buffer while a run is active (v1 `latestOutput`). */

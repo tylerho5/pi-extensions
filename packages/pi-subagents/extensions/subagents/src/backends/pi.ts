@@ -41,6 +41,7 @@ import type {
 import { SendError, SpawnError } from "../domain.ts";
 import { BTW_CONTEXT_END, BTW_CONTEXT_START } from "../by-the-way.ts";
 import { addChildCost } from "../../../shared/child-cost.ts";
+import { childToolPolicy } from "../../../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 import {
   affordableModels,
@@ -48,21 +49,15 @@ import {
   exceedsCostCeiling,
   loadSubagentModels,
   modelKey,
+  type ResolvedDelegationTarget,
 } from "../../../shared/subagent-models.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
 
-/** Tools that headless children must not receive. Everything else stays enabled. */
-const CHILD_EXCLUDED_TOOL_NAMES = [
-  "subagent_spawn",
-  "subagent_wait",
-  "subagent_cancel",
-  "subagent_check",
-  "subagent_list",
-  "workflow",
-  "ask_user",
-  "code_review",
-] as const;
+/** Child tool options applied to every pi subagent session (canonical policy). */
+export function piChildToolOptions() {
+  return childToolPolicy();
+}
 
 // --- Model + effort resolution -----------------------------------------------
 
@@ -76,48 +71,39 @@ function affordableLabels(registry: ModelRegistry, cwd: string) {
 }
 
 /**
- * Resolve the generic model hint against the parent registry:
- * "provider/model-id" is exact; a bare id prefers the configured default's
- * provider, then must be unambiguous across providers. No hint uses the
- * configured default (/subagent-model) rather than inheriting the parent, so
- * delegated work does not silently run on an expensive interactive model.
+ * Resolve the resolved delegation target against the parent registry. A
+ * configured tier carries an exact provider/model pair; an explicit override
+ * keeps "provider/model" exact and lets a bare id prefer the standard tier's
+ * provider, then require an unambiguous match across providers.
  */
 function resolvePiModel(
   registry: ModelRegistry,
-  hint: string | undefined,
+  target: Extract<ResolvedDelegationTarget, { harness: "pi" }>,
 ): Model<any> | undefined {
-  const configured = loadSubagentModels().pi;
-  if (!hint) {
-    const preferred = registry.find(configured.provider, configured.model);
-    if (preferred) return preferred;
-    // Configured default is gone (key removed, model retired). Fail loudly
-    // rather than falling back to whatever the parent happens to run on.
+  if (target.provider) {
+    const found = registry.find(target.provider, target.model);
+    if (found) return found;
     throw new Error(
-      `Default subagent model "${configured.provider}/${configured.model}" is not available. Run /subagent-model to pick another.`,
+      target.source.kind === "tier"
+        ? `Subagent tier "${target.source.tier}" targets "${target.provider}/${target.model}", which is not available. Run /subagent-model to pick another.`
+        : `Unknown model "${target.provider}/${target.model}".`,
     );
   }
-  const slash = hint.indexOf("/");
-  if (slash > 0) {
-    const provider = hint.slice(0, slash);
-    const id = hint.slice(slash + 1);
-    const found = registry.find(provider, id);
-    if (found) return found;
-    throw new Error(`Unknown model "${hint}".`);
-  }
-  const found = registry.find(configured.provider, hint);
+  const provider = loadSubagentModels().pi.provider;
+  const found = registry.find(provider, target.model);
   if (found) return found;
-  const matches = registry.getAll().filter((m) => m.id === hint);
+  const matches = registry.getAll().filter((m) => m.id === target.model);
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
     throw new Error(
-      `Model "${hint}" exists in multiple providers (${matches.map((m) => m.provider).join(", ")}). Use "provider/${hint}".`,
+      `Model "${target.model}" exists in multiple providers (${matches.map((m) => m.provider).join(", ")}). Use "provider/${target.model}".`,
     );
   }
-  throw new Error(`Unknown model "${hint}".`);
+  throw new Error(`Unknown model "${target.model}".`);
 }
 
 /**
- * Reject expensive models an agent picked for itself. A configured default or a
+ * Reject expensive models an agent picked for itself. A configured tier or a
  * user aside (/btw) is deliberate, so neither is checked.
  */
 function enforceCostCeiling(
@@ -125,7 +111,7 @@ function enforceCostCeiling(
   model: Model<any>,
   task: SpawnTask,
 ) {
-  if (!task.model || task.origin === "btw") return;
+  if (task.target.source.kind !== "explicit") return;
   if (!exceedsCostCeiling(model.cost)) return;
   throw new Error(
     costCeilingMessage({
@@ -378,18 +364,23 @@ const makePiSession = (
         message: "pi backend requires the parent session's model registry.",
       });
     }
+    const target = task.target;
+    if (target.harness !== "pi") {
+      return yield* new SpawnError({
+        message: `The pi backend cannot run a "${target.harness}" target.`,
+      });
+    }
 
     const model = yield* Effect.try({
       try: () => {
-        const resolved = resolvePiModel(registry, task.model);
+        const resolved = resolvePiModel(registry, target);
         if (resolved) enforceCostCeiling(registry, resolved, task);
         return resolved;
       },
       catch: (error) => new SpawnError({ message: boundedError(error) }),
     });
     // pi's thinking levels ARE the shared reasoning-effort scale.
-    const thinkingLevel = (task.reasoningEffort ??
-      loadSubagentModels().pi.effort) as ThinkingLevel | undefined;
+    const thinkingLevel = target.effort as ThinkingLevel | undefined;
 
     // Parent conversation the btw child inherits, mapped once up front so the
     // same objects are both appended to the child session file and used for
@@ -414,7 +405,7 @@ const makePiSession = (
         // entry, and a large inherited prefix would push it out of range.
         try {
           sessionManager.appendSessionInfo(
-            `${task.origin === "btw" ? "btw" : "subagent"}: ${task.title}`,
+            `${task.origin === "btw" ? "btw" : "subagent"}: ${task.description}`,
           );
         } catch {
           // Naming is best-effort.
@@ -427,7 +418,7 @@ const makePiSession = (
           resourceLoader: loader,
           model,
           thinkingLevel,
-          excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES],
+          ...piChildToolOptions(),
           // btw asides are one-off questions answered from context: the child
           // gets no tools at all, so it cannot wander into tool use.
           noTools: task.origin === "btw" ? "all" : undefined,
