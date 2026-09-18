@@ -2,8 +2,12 @@
  * Default models for delegated work (subagent harnesses and workflow agents),
  * plus the cost ceiling that keeps agent-chosen models off the expensive tier.
  *
+ * Delegation targets are configured per semantic tier: fast, standard, and deep
+ * on the native pi harness, and claude for the secondary harness. Version 1
+ * { pi, claude, costCeiling } files migrate in memory.
+ *
  * Defaults are user intent, so they are never ceiling-checked: the ceiling only
- * applies to a model an agent picked for itself. Set the defaults with
+ * applies to a model an agent picked for itself. Set the tiers with
  * /subagent-model and the ceiling with /subagent-cost.
  */
 
@@ -71,6 +75,69 @@ export const CLAUDE_MODEL_CHOICES = [
   "opus",
   "fable",
 ] as const;
+
+/** The fixed semantic tiers a caller picks for delegated work. */
+export const DELEGATION_TIERS = ["fast", "standard", "deep", "claude"] as const;
+export type DelegationTier = (typeof DELEGATION_TIERS)[number];
+
+export interface PiTarget {
+  readonly harness: "pi";
+  readonly provider: string;
+  readonly model: string;
+  readonly effort: Effort;
+}
+
+/** Claude Code takes model aliases, not registry entries. */
+export interface ClaudeTarget {
+  readonly harness: "claude";
+  readonly model: string;
+  readonly effort: Effort;
+}
+
+export interface DelegationTiers {
+  readonly fast: PiTarget;
+  readonly standard: PiTarget;
+  readonly deep: PiTarget;
+  readonly claude: ClaudeTarget;
+}
+
+export interface DelegationConfig {
+  readonly version: 2;
+  readonly costCeiling: number | null;
+  readonly tiers: DelegationTiers;
+}
+
+/** What one caller asks for: a fixed tier, or a concrete harness/model/effort. */
+export interface DelegationSelection {
+  readonly tier?: DelegationTier;
+  readonly harness?: "pi" | "claude";
+  readonly model?: string;
+  readonly effort?: Effort;
+}
+
+type DelegationTarget = PiTarget | ClaudeTarget;
+
+const DEFAULT_PI_TARGET: PiTarget = {
+  harness: "pi",
+  ...DEFAULT_SUBAGENT_MODELS.pi,
+};
+
+const DEFAULT_CLAUDE_TARGET: ClaudeTarget = {
+  harness: "claude",
+  ...DEFAULT_SUBAGENT_MODELS.claude,
+};
+
+/** Code defaults reuse the legacy pi target for every pi tier. */
+export const DEFAULT_DELEGATION_CONFIG: DelegationConfig = {
+  version: 2,
+  costCeiling: DEFAULT_COST_CEILING,
+  tiers: {
+    fast: DEFAULT_PI_TARGET,
+    standard: DEFAULT_PI_TARGET,
+    deep: DEFAULT_PI_TARGET,
+    claude: DEFAULT_CLAUDE_TARGET,
+  },
+};
 
 const sharedDirectory = dirname(fileURLToPath(import.meta.url));
 export const SUBAGENT_MODELS_PATH = join(
@@ -152,53 +219,245 @@ function parseCostCeiling(value: unknown): number | null {
   return DEFAULT_COST_CEILING;
 }
 
-function parsePi(value: unknown): PiDefaults {
-  if (!isRecord(value)) return DEFAULT_SUBAGENT_MODELS.pi;
+const harnessMatches = (value: unknown, harness: "pi" | "claude") =>
+  value === undefined || value === harness;
+
+function parsePiTarget(value: unknown, fallback: PiTarget): PiTarget {
+  if (!isRecord(value) || !harnessMatches(value.harness, "pi")) return fallback;
   const provider = nonEmpty(value.provider);
   const model = nonEmpty(value.model);
-  if (!provider || !model || !isEffort(value.effort)) {
-    return DEFAULT_SUBAGENT_MODELS.pi;
+  if (!provider || !model || !isEffort(value.effort)) return fallback;
+  return { harness: "pi", provider, model, effort: value.effort };
+}
+
+function parseClaudeTarget(
+  value: unknown,
+  fallback: ClaudeTarget,
+): ClaudeTarget {
+  if (!isRecord(value) || !harnessMatches(value.harness, "claude")) {
+    return fallback;
   }
-  return { provider, model, effort: value.effort };
-}
-
-function parseClaude(value: unknown): ClaudeDefaults {
-  if (!isRecord(value)) return DEFAULT_SUBAGENT_MODELS.claude;
   const model = nonEmpty(value.model);
-  if (!model || !isEffort(value.effort)) return DEFAULT_SUBAGENT_MODELS.claude;
-  return { model, effort: value.effort };
+  if (!model || !isEffort(value.effort)) return fallback;
+  return { harness: "claude", model, effort: value.effort };
 }
 
-/** Each field falls back independently, so one bad value keeps the rest. */
-export function parseSubagentModels(value: unknown): SubagentModels {
-  if (!isRecord(value)) return DEFAULT_SUBAGENT_MODELS;
+function parseTiers(value: Record<string, unknown>): DelegationTiers {
+  const defaults = DEFAULT_DELEGATION_CONFIG.tiers;
+  if (value.version === 2 && isRecord(value.tiers)) {
+    const tiers = value.tiers;
+    return {
+      fast: parsePiTarget(tiers.fast, defaults.fast),
+      standard: parsePiTarget(tiers.standard, defaults.standard),
+      deep: parsePiTarget(tiers.deep, defaults.deep),
+      claude: parseClaudeTarget(tiers.claude, defaults.claude),
+    };
+  }
+  const pi = parsePiTarget(value.pi, defaults.standard);
   return {
-    costCeiling: parseCostCeiling(value.costCeiling),
-    pi: parsePi(value.pi),
-    claude: parseClaude(value.claude),
+    fast: pi,
+    standard: pi,
+    deep: pi,
+    claude: parseClaudeTarget(value.claude, defaults.claude),
   };
 }
 
-export function loadSubagentModels(): SubagentModels {
+/** Each tier falls back independently, so one bad entry keeps the rest. */
+export function parseDelegationConfig(value: unknown): DelegationConfig {
+  if (!isRecord(value)) return DEFAULT_DELEGATION_CONFIG;
+  return {
+    version: 2,
+    costCeiling: parseCostCeiling(value.costCeiling),
+    tiers: parseTiers(value),
+  };
+}
+
+/** Legacy per-harness view; the pi half reports the standard tier. */
+export function parseSubagentModels(value: unknown): SubagentModels {
+  return toSubagentModels(parseDelegationConfig(value));
+}
+
+function toSubagentModels(config: DelegationConfig): SubagentModels {
+  return {
+    costCeiling: config.costCeiling,
+    pi: {
+      provider: config.tiers.standard.provider,
+      model: config.tiers.standard.model,
+      effort: config.tiers.standard.effort,
+    },
+    claude: {
+      model: config.tiers.claude.model,
+      effort: config.tiers.claude.effort,
+    },
+  };
+}
+
+export function loadDelegationConfig(
+  path = SUBAGENT_MODELS_PATH,
+): DelegationConfig {
   try {
-    return parseSubagentModels(
-      JSON.parse(readFileSync(SUBAGENT_MODELS_PATH, "utf8")),
-    );
+    return parseDelegationConfig(JSON.parse(readFileSync(path, "utf8")));
   } catch {
-    return DEFAULT_SUBAGENT_MODELS;
+    return DEFAULT_DELEGATION_CONFIG;
   }
 }
 
+export async function saveDelegationConfig(
+  config: DelegationConfig,
+  path = SUBAGENT_MODELS_PATH,
+) {
+  await writeJsonAtomic(path, config);
+}
+
+export function loadSubagentModels(): SubagentModels {
+  return toSubagentModels(loadDelegationConfig());
+}
+
 export async function saveSubagentModels(config: SubagentModels) {
-  const tempPath = `${SUBAGENT_MODELS_PATH}.${process.pid}.${randomUUID()}.tmp`;
-  await mkdir(dirname(SUBAGENT_MODELS_PATH), { recursive: true });
+  await writeJsonAtomic(SUBAGENT_MODELS_PATH, config);
+}
+
+async function writeJsonAtomic(file: string, value: unknown) {
+  const tempPath = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  await mkdir(dirname(file), { recursive: true });
   try {
-    await writeFile(tempPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    await rename(tempPath, SUBAGENT_MODELS_PATH);
+    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await rename(tempPath, file);
   } catch (error) {
     await unlink(tempPath).catch(() => undefined);
     throw error;
   }
+}
+
+export type ResolvedDelegationTarget =
+  | {
+      readonly harness: "pi";
+      readonly provider?: string;
+      readonly model: string;
+      readonly effort: Effort;
+      readonly source:
+        | { readonly kind: "tier"; readonly tier: DelegationTier }
+        | { readonly kind: "explicit" };
+    }
+  | {
+      readonly harness: "claude";
+      readonly model: string;
+      readonly effort: Effort;
+      readonly source:
+        | { readonly kind: "tier"; readonly tier: "claude" }
+        | { readonly kind: "explicit" };
+    };
+
+function splitPiModel(value: string): { provider?: string; model: string } {
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1) return { model: value };
+  return { provider: value.slice(0, slash), model: value.slice(slash + 1) };
+}
+
+function explicitEffort(effort: Effort | undefined, fallback: Effort): Effort {
+  if (effort === undefined) return fallback;
+  if (!isEffort(effort)) {
+    throw new Error(
+      `Unknown effort "${String(effort)}". Valid efforts: ${EFFORTS.join(", ")}.`,
+    );
+  }
+  return effort;
+}
+
+function tierTarget(
+  config: DelegationConfig,
+  tier: DelegationTier,
+  supportedHarnesses: readonly ("pi" | "claude")[],
+): ResolvedDelegationTarget {
+  const target: DelegationTarget | undefined = config.tiers[tier];
+  if (!target) {
+    throw new Error(`Tier "${tier}" is not defined in the delegation config.`);
+  }
+  if (!supportedHarnesses.includes(target.harness)) {
+    throw new Error(
+      `Tier "${tier}" resolves to the "${target.harness}" harness, which ` +
+        `this caller does not support. Supported harnesses: ${harnessList(supportedHarnesses)}.`,
+    );
+  }
+  if (target.harness === "claude") {
+    return {
+      harness: "claude",
+      model: target.model,
+      effort: target.effort,
+      source: { kind: "tier", tier: "claude" },
+    };
+  }
+  return {
+    harness: "pi",
+    provider: target.provider,
+    model: target.model,
+    effort: target.effort,
+    source: { kind: "tier", tier },
+  };
+}
+
+const harnessList = (supported: readonly ("pi" | "claude")[]) =>
+  supported.join(", ") || "none";
+
+/** Pure mapping from a caller selection to one normalized delegation target. */
+export function resolveDelegationTarget(options: {
+  readonly config: DelegationConfig;
+  readonly selection: DelegationSelection;
+  readonly supportedHarnesses: readonly ("pi" | "claude")[];
+}): ResolvedDelegationTarget {
+  const { config, selection, supportedHarnesses } = options;
+  const explicit =
+    selection.harness !== undefined ||
+    selection.model !== undefined ||
+    selection.effort !== undefined;
+
+  if (selection.tier !== undefined) {
+    if (explicit) {
+      throw new Error(
+        `Tier "${selection.tier}" cannot be combined with an explicit harness, model, or effort.`,
+      );
+    }
+    return tierTarget(config, selection.tier, supportedHarnesses);
+  }
+
+  if (!explicit) return tierTarget(config, "standard", supportedHarnesses);
+
+  const harness = selection.harness;
+  if (harness === undefined) {
+    throw new Error(
+      `An explicit model or effort requires "harness" (one of: ${harnessList(supportedHarnesses)}).`,
+    );
+  }
+  if (!supportedHarnesses.includes(harness)) {
+    throw new Error(
+      `Harness "${harness}" is not supported here. Supported harnesses: ${harnessList(supportedHarnesses)}.`,
+    );
+  }
+  const model = nonEmpty(selection.model);
+  if (!model) {
+    throw new Error(
+      `Harness "${harness}" requires an explicit "model" ` +
+        `(${harness === "pi" ? '"provider/model"' : "a Claude Code alias"}).`,
+    );
+  }
+
+  if (harness === "claude") {
+    return {
+      harness: "claude",
+      model,
+      effort: explicitEffort(selection.effort, config.tiers.claude.effort),
+      source: { kind: "explicit" },
+    };
+  }
+
+  const split = splitPiModel(model);
+  return {
+    harness: "pi",
+    ...(split.provider === undefined ? {} : { provider: split.provider }),
+    model: split.model,
+    effort: explicitEffort(selection.effort, config.tiers.standard.effort),
+    source: { kind: "explicit" },
+  };
 }
 
 /** Null when the ceiling is disabled. Env is a per-launch override of the file. */

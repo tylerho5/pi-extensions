@@ -1,8 +1,10 @@
 /**
- * /subagent-model — pick the default model and effort per harness.
+ * /subagent-model — pick the default model and effort for each delegation tier.
  *
- * These defaults are what every spawn uses when the agent omits `model`, and
- * they are exempt from the cost ceiling: choosing here is an explicit decision.
+ * A tier is a fixed harness, so the flow selects the tier first and then the
+ * model that tier's harness accepts. These defaults are what a tier resolves
+ * to and are exempt from the cost ceiling: choosing here is an explicit
+ * decision.
  */
 
 import {
@@ -17,64 +19,170 @@ import {
 import {
   CLAUDE_MODEL_CHOICES,
   curatedModels,
+  DELEGATION_TIERS,
   EFFORTS,
-  exceedsCostCeiling,
   modelKey,
+  type ClaudeTarget,
+  type DelegationConfig,
+  type DelegationTier,
+  type DelegationTiers,
   type Effort,
-  type SubagentModels,
+  type PiTarget,
 } from "../../../shared/subagent-models.ts";
 
 const isEffort = (value: unknown): value is Effort =>
   typeof value === "string" && EFFORTS.includes(value as Effort);
 
 /** Marks models the agent may not select on its own, so the cost is visible. */
-function modelLabel(model: Model<Api>) {
+function modelLabel(model: Model<Api>, ceiling: number | null) {
   const price = model.cost?.output;
   const cost = typeof price === "number" ? ` · $${price}/Mtok out` : "";
-  const overCeiling = exceedsCostCeiling(model.cost) ? " · over ceiling" : "";
+  const overCeiling =
+    ceiling !== null && price !== undefined && price > ceiling
+      ? " · over ceiling"
+      : "";
   return `${modelKey(model)}${cost}${overCeiling}`;
 }
 
-export async function pickHarness(
-  ctx: ExtensionCommandContext,
-  current: SubagentModels,
-) {
-  const options = [
-    `pi · ${current.pi.provider}/${current.pi.model} · ${current.pi.effort}`,
-    `claude · ${current.claude.model} · ${current.claude.effort}`,
-  ];
-  const selected = await ctx.ui.select("Subagent harness", options);
-  if (selected === undefined) return undefined;
-  return options.indexOf(selected) === 0
-    ? ("pi" as const)
-    : ("claude" as const);
+/** Levels the model itself supports; a non-reasoning model only takes `off`. */
+function piEffortOptions(model: Model<Api>): Effort[] {
+  return getSupportedThinkingLevels(model);
 }
 
-/** The enabled-models list, cheapest first — not every model a provider offers. */
-export async function pickPiModel(ctx: ExtensionCommandContext) {
-  const models = curatedModels(ctx.modelRegistry.getAvailable(), ctx.cwd);
+/** Claude Code takes a thinking budget, so every level is available. */
+function claudeEffortOptions(): Effort[] {
+  return [...EFFORTS];
+}
+
+/** `harness/model · effort` — the mapping half of a tier line. */
+export function tierTargetLabel(
+  config: DelegationConfig,
+  tier: DelegationTier,
+) {
+  const target = config.tiers[tier];
+  const model =
+    target.harness === "pi"
+      ? `${target.provider}/${target.model}`
+      : target.model;
+  return `${target.harness}/${model} · ${target.effort}`;
+}
+
+/** First-screen line: the tier name plus its current mapping. */
+function tierLabel(config: DelegationConfig, tier: DelegationTier) {
+  return `${tier} · ${tierTargetLabel(config, tier)}`;
+}
+
+/** Replace one tier, keeping every other tier and the ceiling untouched. */
+export function applyTierSelection(
+  config: DelegationConfig,
+  tier: DelegationTier,
+  target: PiTarget | ClaudeTarget,
+): DelegationConfig {
+  const tiers: DelegationTiers = { ...config.tiers, [tier]: target };
+  return { ...config, tiers };
+}
+
+export interface TierPickerUi {
+  select(
+    title: string,
+    options: readonly string[],
+  ): Promise<string | undefined>;
+  pickEffort(
+    options: readonly Effort[],
+    current: Effort,
+  ): Promise<Effort | undefined>;
+  notify(message: string, type: "info" | "warning" | "error"): void;
+}
+
+export interface TierPickerDeps {
+  readonly ui: TierPickerUi;
+  readonly config: DelegationConfig;
+  readonly cwd: string;
+  readonly models: readonly Model<Api>[];
+  readonly ceiling: number | null;
+}
+
+export interface TierPickerResult {
+  readonly tier: DelegationTier;
+  readonly config: DelegationConfig;
+}
+
+/**
+ * Tier-first flow: tier → model for that tier's fixed harness → effort.
+ * Returns the complete next config, or undefined when any step is cancelled.
+ */
+export async function pickTierConfig(
+  deps: TierPickerDeps,
+): Promise<TierPickerResult | undefined> {
+  const { ui, config } = deps;
+  const labels = DELEGATION_TIERS.map((tier) => tierLabel(config, tier));
+  const tierChoice = await ui.select("Subagent tier", labels);
+  if (tierChoice === undefined) return undefined;
+  const tier = DELEGATION_TIERS[labels.indexOf(tierChoice)];
+  if (tier === undefined) return undefined;
+
+  if (tier === "claude") {
+    const model = await ui.select("Default Claude Code subagent model", [
+      ...CLAUDE_MODEL_CHOICES,
+    ]);
+    if (model === undefined) return undefined;
+    const effort = await ui.pickEffort(
+      claudeEffortOptions(),
+      config.tiers.claude.effort,
+    );
+    if (effort === undefined) return undefined;
+    return {
+      tier,
+      config: applyTierSelection(config, tier, {
+        harness: "claude",
+        model,
+        effort,
+      }),
+    };
+  }
+
+  const models = curatedModels(deps.models, deps.cwd);
   if (models.length === 0) {
-    ctx.ui.notify("No configured models are available.", "warning");
+    ui.notify("No configured models are available.", "warning");
     return undefined;
   }
-  const labels = models.map(modelLabel);
-  const selected = await ctx.ui.select("Default pi subagent model", labels);
-  return selected === undefined ? undefined : models[labels.indexOf(selected)];
+  const modelLabels = models.map((model) => modelLabel(model, deps.ceiling));
+  const modelChoice = await ui.select(
+    `Default ${tier} pi subagent model`,
+    modelLabels,
+  );
+  if (modelChoice === undefined) return undefined;
+  const model = models[modelLabels.indexOf(modelChoice)];
+  if (model === undefined) return undefined;
+  const effort = await ui.pickEffort(
+    piEffortOptions(model),
+    config.tiers[tier].effort,
+  );
+  if (effort === undefined) return undefined;
+  return {
+    tier,
+    config: applyTierSelection(config, tier, {
+      harness: "pi",
+      provider: model.provider,
+      model: model.id,
+      effort,
+    }),
+  };
 }
 
-/** Only levels the chosen model actually supports. */
-export async function pickPiEffort(
+/** Thinking-level selector over the levels the chosen model supports. */
+export async function pickEffort(
   ctx: ExtensionCommandContext,
-  model: Model<Api>,
+  options: readonly Effort[],
   current: Effort,
 ) {
-  const supported = getSupportedThinkingLevels(model);
-  const start = supported.includes(current) ? current : (supported[0] ?? "off");
+  const levels = [...options];
+  const start = levels.includes(current) ? current : (levels[0] ?? "off");
   const selected = await ctx.ui.custom<string | undefined>(
     (tui, _theme, _keybindings, done) => {
       const selector = new ThinkingSelectorComponent(
         start,
-        supported,
+        levels,
         (level) => done(level),
         () => done(undefined),
       );
@@ -89,18 +197,5 @@ export async function pickPiEffort(
       };
     },
   );
-  return isEffort(selected) ? selected : undefined;
-}
-
-export async function pickClaudeModel(ctx: ExtensionCommandContext) {
-  const selected = await ctx.ui.select("Default Claude Code subagent model", [
-    ...CLAUDE_MODEL_CHOICES,
-  ]);
-  return selected === undefined ? undefined : selected;
-}
-
-/** Claude Code takes a thinking budget, so every level is available. */
-export async function pickClaudeEffort(ctx: ExtensionCommandContext) {
-  const selected = await ctx.ui.select("Thinking effort", [...EFFORTS]);
   return isEffort(selected) ? selected : undefined;
 }

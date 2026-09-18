@@ -30,9 +30,15 @@ import type {
 import {
   affordableModels,
   costCeilingMessage,
+  DELEGATION_TIERS,
   exceedsCostCeiling,
+  loadDelegationConfig,
   loadSubagentModels,
   modelKey,
+  resolveDelegationTarget,
+  type DelegationConfig,
+  type DelegationTier,
+  type ResolvedDelegationTarget,
 } from "../shared/subagent-models.ts";
 import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
 import { loadDefaultBudget, WorkflowBudget } from "./budget.ts";
@@ -90,6 +96,7 @@ interface AgentCallOptions {
   label?: unknown;
   phase?: unknown;
   schema?: unknown;
+  tier?: unknown;
   model?: unknown;
   provider?: unknown;
   effort?: unknown;
@@ -280,6 +287,8 @@ export interface LaunchDeps {
   setLastUi: (ui: ExtensionContext["ui"]) => void;
   runAgent: typeof runAgent;
   createResources: typeof createWorkflowResources;
+  /** Injectable delegation config for tests; defaults to the file-backed loader. */
+  loadDelegationConfig?: () => DelegationConfig;
 }
 
 function toOutcome<T>(details: WorkflowDetails, runId: string): RunOutcome<T> {
@@ -299,6 +308,8 @@ function toOutcome<T>(details: WorkflowDetails, runId: string): RunOutcome<T> {
 
 export function createLaunch(deps: LaunchDeps) {
   const { pi, activeRuns, updateIndicator, recordSettledRun, setLastUi } = deps;
+  const readDelegationConfig =
+    deps.loadDelegationConfig ?? loadDelegationConfig;
 
   return function launch<T>(
     spec: InternalLaunchSpec<T>,
@@ -490,78 +501,127 @@ export function createLaunch(deps: LaunchDeps) {
 
       return controller
         .schedule(async (runSignal) => {
-          // Model/provider resolution: default to the configured subagent
-          // model, not the parent session's, so fan-out does not run a fleet of
-          // agents on an expensive interactive model. An unresolvable default
-          // fails loudly (matching the subagent backends) instead of silently
-          // inheriting the parent's interactive model.
-          const defaultModel = resolveDefaultAgentModel(ctx);
-          if (!defaultModel) {
-            const configured = loadSubagentModels().pi;
-            return fail(
-              `agent "${label}": default subagent model "${configured.provider}/${configured.model}" is not available. Run /subagent-model to pick another.`,
-            );
-          }
-          let model: WorkflowModel | undefined = defaultModel;
-          if (opts.model !== undefined || opts.provider !== undefined) {
-            const modelOpt =
-              typeof opts.model === "string" ? opts.model : undefined;
-            const providerOpt =
-              typeof opts.provider === "string" ? opts.provider : undefined;
-            if (!modelOpt)
+          // Tier resolution: omitted means `standard`. Explicit
+          // model/provider/effort is the override path and bypasses tiers.
+          const hasExplicitTarget =
+            opts.model !== undefined ||
+            opts.provider !== undefined ||
+            opts.effort !== undefined;
+          let tier: DelegationTier | undefined;
+          if (opts.tier !== undefined) {
+            const raw =
+              typeof opts.tier === "string" ? opts.tier : String(opts.tier);
+            if (!(DELEGATION_TIERS as readonly string[]).includes(raw))
               return fail(
-                `agent "${label}": \`provider\` requires \`model\` as well`,
+                `agent "${label}": invalid tier "${raw}" (use ${DELEGATION_TIERS.join("|")})`,
               );
-            const resolution = resolveModelOption(
-              ctx.modelRegistry,
-              modelOpt,
-              providerOpt,
-              loadRegistrySettings().modelAliases,
+            tier = raw as DelegationTier;
+          }
+          if (tier !== undefined && hasExplicitTarget)
+            return fail(
+              `agent "${label}": tier "${tier}" cannot be combined with an explicit model, provider, or effort`,
             );
-            if (resolution.kind === "unknown") {
-              const requested = providerOpt
-                ? `${providerOpt}/${modelOpt}`
-                : modelOpt;
+
+          let model: WorkflowModel | undefined;
+          let thinkingLevel: ThinkingLevel;
+          if (tier === undefined && hasExplicitTarget) {
+            // Default to the configured subagent model, not the parent
+            // session's, so fan-out does not run expensive interactive models.
+            const defaultModel = resolveDefaultAgentModel(ctx);
+            if (!defaultModel) {
+              const configured = loadSubagentModels().pi;
               return fail(
-                resolution.brokenAliasTarget
-                  ? `agent "${label}": model alias "${modelOpt}" targets "${resolution.brokenAliasTarget}", which is not in the model registry (fix modelAliases in workflows.json)`
-                  : `agent "${label}": unknown model "${requested}" (use provider/id)`,
+                `agent "${label}": default subagent model "${configured.provider}/${configured.model}" is not available. Run /subagent-model to pick another.`,
               );
             }
-            if (resolution.kind === "exact") {
-              if (exceedsCostCeiling(resolution.model.cost)) {
+            model = defaultModel;
+            if (opts.model !== undefined || opts.provider !== undefined) {
+              const modelOpt =
+                typeof opts.model === "string" ? opts.model : undefined;
+              const providerOpt =
+                typeof opts.provider === "string" ? opts.provider : undefined;
+              if (!modelOpt)
                 return fail(
-                  `agent "${label}": ` +
-                    costCeilingMessage({
-                      label: `${resolution.model.provider}/${resolution.model.id}`,
-                      cost: resolution.model.cost,
-                      alternatives: affordableAgentModels(ctx),
-                    }),
+                  `agent "${label}": \`provider\` requires \`model\` as well`,
+                );
+              const resolution = resolveModelOption(
+                ctx.modelRegistry,
+                modelOpt,
+                providerOpt,
+                loadRegistrySettings().modelAliases,
+              );
+              if (resolution.kind === "unknown") {
+                const requested = providerOpt
+                  ? `${providerOpt}/${modelOpt}`
+                  : modelOpt;
+                return fail(
+                  resolution.brokenAliasTarget
+                    ? `agent "${label}": model alias "${modelOpt}" targets "${resolution.brokenAliasTarget}", which is not in the model registry (fix modelAliases in workflows.json)`
+                    : `agent "${label}": unknown model "${requested}" (use provider/id)`,
                 );
               }
-              model = resolution.model;
-            } else {
-              // "alias": user-configured intent — no cost ceiling. "default":
-              // known CC alias with no mapping — keep the subagent default.
-              if (resolution.kind === "alias") model = resolution.model;
-              record.requestedModel = resolution.alias;
+              if (resolution.kind === "exact") {
+                if (exceedsCostCeiling(resolution.model.cost)) {
+                  return fail(
+                    `agent "${label}": ` +
+                      costCeilingMessage({
+                        label: `${resolution.model.provider}/${resolution.model.id}`,
+                        cost: resolution.model.cost,
+                        alternatives: affordableAgentModels(ctx),
+                      }),
+                  );
+                }
+                model = resolution.model;
+              } else {
+                // "alias": user-configured intent — no cost ceiling. "default":
+                // known CC alias with no mapping — keep the subagent default.
+                if (resolution.kind === "alias") model = resolution.model;
+                record.requestedModel = resolution.alias;
+              }
+            }
+            // Effort → thinking level; default inherits the parent session.
+            thinkingLevel = pi.getThinkingLevel();
+            if (opts.effort !== undefined) {
+              const effort = String(opts.effort);
+              if (!(THINKING_LEVELS as readonly string[]).includes(effort)) {
+                return fail(
+                  `agent "${label}": invalid effort "${effort}" (use ${THINKING_LEVELS.join("|")})`,
+                );
+              }
+              thinkingLevel = effort as ThinkingLevel;
+            }
+          } else {
+            let resolved: ResolvedDelegationTarget;
+            try {
+              resolved = resolveDelegationTarget({
+                config: readDelegationConfig(),
+                selection: tier === undefined ? {} : { tier },
+                supportedHarnesses: ["pi"],
+              });
+            } catch (error) {
+              return fail(`agent "${label}": ${errorText(error)}`);
+            }
+            if (resolved.harness !== "pi")
+              return fail(
+                `agent "${label}": the workflow runner supports only the pi harness`,
+              );
+            const provider = resolved.provider!;
+            const found = ctx.modelRegistry.find(provider, resolved.model);
+            if (!found)
+              return fail(
+                `agent "${label}": tier "${resolved.source.kind === "tier" ? resolved.source.tier : "explicit"}" model "${provider}/${resolved.model}" is not available. Run /subagent-model to pick another.`,
+              );
+            model = found;
+            thinkingLevel = resolved.effort as ThinkingLevel;
+            if (resolved.source.kind === "tier") {
+              record.tier = resolved.source.tier;
+              record.requestedModel = resolved.source.tier;
             }
           }
           record.model = model?.id;
           record.contextWindow = model?.contextWindow;
+          record.effort = thinkingLevel;
           emit();
-
-          // Effort → thinking level; default inherits the parent session.
-          let thinkingLevel: ThinkingLevel = pi.getThinkingLevel();
-          if (opts.effort !== undefined) {
-            const effort = String(opts.effort);
-            if (!(THINKING_LEVELS as readonly string[]).includes(effort)) {
-              return fail(
-                `agent "${label}": invalid effort "${effort}" (use ${THINKING_LEVELS.join("|")})`,
-              );
-            }
-            thinkingLevel = effort as ThinkingLevel;
-          }
 
           let childCwd = ctx.cwd;
           let worktree: Awaited<ReturnType<typeof createWorktree>> | undefined;

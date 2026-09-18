@@ -20,7 +20,7 @@ URL fetching for pi: the `web_fetch` tool, modeled on Claude Code's WebFetch (re
 - **Private-address blocking.** Before fetching, the hostname is resolved and blocked if ANY address is in a private range (RFC1918, loopback, link-local, CGNAT, ULA, IPv6 v4-mapped/compatible/96-bit-embedded forms, in both dotted and post-URL-normalization hex shapes). Re-run on every redirect hop, since www-stripping changes the origin. Best-effort (DNS can rebind), but stronger than CC's two-label hostname rule. Jina is never consulted for such hosts.
 - **15-minute cache.** Extracted markdown (not apply answers — prompts differ) is cached per normalized URL (hash and default ports stripped), LRU-ish, max 32 entries. Parallel identical calls share one in-flight fetch instead of stampeding.
 - **Zero dependencies.** The HTML→markdown converter is a local single-pass scanner (removes script/style/noscript/iframe/svg/template/head — unclosed ones drop to end of page, converts headings, links, images, lists, tables, code fences, entities). Linear-time by construction; a hostile page of unclosed tags cannot trigger quadratic regex backtracking. No turndown/cheerio; hard pages are the Jina fallback's job.
-- **Apply model is config and independent of the main agent.** Defaults to `deepseek/deepseek-v4-flash`; see `/web-fetch-model`. The apply call is a one-shot completion with thinking disabled when the model supports it (`"off"`), else the lowest supported level, and an empty system prompt. The page content is framed as untrusted data in the apply prompt (and a guideline tells the main agent the same), so a hostile page cannot steer the answer.
+- **Apply model is config and independent of the main agent.** Defaults to `deepseek/deepseek-flash`; see `/web-fetch-model`. The apply call is a one-shot completion with thinking disabled when the model supports it (`"off"`), else the lowest supported level, and an empty system prompt. The page content is framed as untrusted data in the apply prompt (and a guideline tells the main agent the same), so a hostile page cannot steer the answer.
 
 ## API
 
@@ -52,7 +52,7 @@ Custom rendering: `renderCall` shows the URL and a `+prompt` tag; `renderResult`
 | Arg | Behavior |
 |---|---|
 | *(none)* or `status` | Notify the current `provider/model · maxTokens`. |
-| `default` | Reset to `deepseek/deepseek-v4-flash` / 4096. |
+| `default` | Reset to `deepseek/deepseek-flash` / 4096. |
 | `<provider>/<model>` | Validate against the model registry; save (keeps the current maxTokens). Unknown → error listing available providers. |
 
 `getArgumentCompletions` suggests `status`, `default`.
@@ -64,7 +64,7 @@ Custom rendering: `renderCall` shows the URL and a `+prompt` tag; `renderResult`
 ```json
 {
   "provider": "deepseek",
-  "model": "deepseek-v4-flash",
+  "model": "deepseek-flash",
   "maxTokens": 4096
 }
 ```

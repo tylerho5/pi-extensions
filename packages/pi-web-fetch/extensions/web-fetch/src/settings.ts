@@ -22,7 +22,7 @@ export interface WebFetchSettings {
 /** The apply step should always be cheap; flash models are the right default. */
 export const DEFAULT_WEB_FETCH_SETTINGS: WebFetchSettings = {
   provider: "deepseek",
-  model: "deepseek-v4-flash",
+  model: "deepseek-flash",
   maxTokens: 4_096,
 };
 

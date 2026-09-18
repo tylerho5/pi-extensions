@@ -282,12 +282,12 @@ class BtwPanel implements Component {
         const prefix = isSelected
           ? theme.fg("accent", theme.bold("/btw"))
           : theme.fg("muted", "/btw");
-        const title = isSelected
-          ? theme.fg("text", snap.title)
-          : theme.fg("dim", snap.title);
+        const label = isSelected
+          ? theme.fg("text", snap.description)
+          : theme.fg("dim", snap.description);
         const status =
           snap.status === "running" ? theme.fg("warning", " · running") : "";
-        lines.push(pad(`  ${prefix} ${title}${status}`));
+        lines.push(pad(`  ${prefix} ${label}${status}`));
       }
       if (start > 0) {
         lines[1] = pad(theme.fg("dim", `  ... ${start} earlier`));

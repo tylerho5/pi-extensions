@@ -3,11 +3,15 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatElapsed, type SubagentSnapshot } from "../domain.ts";
 import type { SubagentReadModel } from "../manager.ts";
 
+/** Window for the collapsed down double-tap that opens the rail. */
+export const DOUBLE_TAP_MS = 500;
+
 export class TaskRailController {
   expanded = false;
   showFinished = false;
   selectedId: string | undefined;
   private scrollTop = 0;
+  private lastDownTapAt: number | undefined;
   private requestRender: (() => void) | undefined;
 
   attach(requestRender: () => void) {
@@ -18,7 +22,27 @@ export class TaskRailController {
     this.expanded = false;
     this.selectedId = undefined;
     this.scrollTop = 0;
+    this.lastDownTapAt = undefined;
     this.requestRender?.();
+  }
+
+  /**
+   * A down tap while the rail is collapsed. A lone tap returns false so the
+   * key reaches normal editor navigation; a second tap inside DOUBLE_TAP_MS
+   * opens the rail and returns true so the caller consumes it.
+   */
+  handleCollapsedDown(now: number): boolean {
+    const previous = this.lastDownTapAt;
+    this.lastDownTapAt = now;
+    if (previous === undefined || now - previous > DOUBLE_TAP_MS) return false;
+    this.lastDownTapAt = undefined;
+    this.toggleExpanded();
+    return true;
+  }
+
+  /** Drop a pending first tap when the gesture no longer applies. */
+  clearTap() {
+    this.lastDownTapAt = undefined;
   }
 
   /**
@@ -169,13 +193,13 @@ export function createTaskRail(
       for (const snap of windowed) {
         const selected = snap.id === controller.selectedId;
         const marker = selected ? theme.fg("accent", "❯") : " ";
-        const title = selected
-          ? theme.fg("accent", snap.title)
-          : theme.fg("text", snap.title);
+        const label = selected
+          ? theme.fg("accent", snap.description)
+          : theme.fg("text", snap.description);
         const right =
           theme.fg("muted", ` · ${formatElapsed(snap)} · `) +
           stateText(snap, theme);
-        const left = `${marker} ${title}${theme.fg("dim", ` ${snap.id}`)}`;
+        const left = `${marker} ${label}${theme.fg("dim", ` ${snap.id}`)}`;
         const available = Math.max(1, width - visibleWidth(right));
         lines.push(truncateToWidth(left, available) + right);
       }
