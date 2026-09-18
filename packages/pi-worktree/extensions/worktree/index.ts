@@ -2,8 +2,10 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  SessionShutdownEvent,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
 import {
   createBashToolDefinition,
   createEditToolDefinition,
@@ -17,7 +19,13 @@ import {
 import * as path from "node:path";
 import { Type } from "typebox";
 import { loadConfig } from "./config.ts";
-import { enterWorktree, exitWorktree, WorktreeSessionError } from "./core.ts";
+import {
+  chooseExitAction,
+  enterWorktree,
+  exitWorktree,
+  worktreeChanges,
+  WorktreeSessionError,
+} from "./core.ts";
 import { errorText } from "./git.ts";
 import {
   ENTER_NAME_PARAM_DESCRIPTION,
@@ -73,30 +81,114 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function timeBoxedKeepOrRemove(
+    ctx: ExtensionContext,
+    title: string,
+    message: string,
+  ): Promise<boolean> {
+    // CC's WorktreeExitDialog is a Keep/Remove choice. On an interactive quit pi
+    // has already torn down the TUI, so a select may never resolve — race it
+    // against a timeout and default to keep so exit never hangs or destroys work.
+    try {
+      const choice = await Promise.race([
+        ctx.ui.select(`${title}\n${message}`, [
+          "Keep worktree",
+          "Remove worktree",
+        ]),
+        new Promise<undefined>((resolve) =>
+          setTimeout(() => resolve(undefined), 5000),
+        ),
+      ]);
+      return choice !== "Remove worktree";
+    } catch {
+      return true;
+    }
+  }
+
   pi.on("session_start", (_event, ctx) => {
     sessionCwd = ctx.cwd;
     registerProxies(pi);
+    const sessionId = ctx.sessionManager.getSessionId();
     const stored = store.load();
-    if (
-      !active &&
-      stored &&
-      path.resolve(stored.sessionCwd) === path.resolve(ctx.cwd)
-    ) {
-      active = stored;
-      store.writeLock({
-        pid: process.pid,
-        sessionId: stored.sessionId,
-        createdAt: Date.now(),
-        worktreePath: stored.worktreePath,
-      });
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          `Resumed worktree session at ${stored.worktreePath} — use exit_worktree to leave, /worktree for status.`,
-          "info",
-        );
+    // Per-session scoping, matching CC: only the session that entered the
+    // worktree (same session id) re-enters it. A fresh or different session in
+    // the same repo starts in the default working tree, never the worktree.
+    if (!active && stored && stored.sessionId === sessionId) {
+      if (fs.existsSync(stored.worktreePath)) {
+        active = stored;
+        store.writeLock({
+          pid: process.pid,
+          sessionId: stored.sessionId,
+          createdAt: Date.now(),
+          worktreePath: stored.worktreePath,
+        });
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Resumed worktree session at ${stored.worktreePath} — use exit_worktree to leave, /worktree for status.`,
+            "info",
+          );
+        }
+      } else {
+        // CC: the recorded worktree no longer exists — clear the binding and
+        // continue in the current directory without isolation.
+        store.clear();
+        store.releaseLock(stored.worktreePath);
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Your worktree at ${stored.worktreePath} no longer exists; the worktree binding was cleared. Continuing in the current directory.`,
+            "info",
+          );
+        }
       }
     }
     refreshStatus(ctx);
+  });
+
+  /**
+   * CC's WorktreeExitDialog: when a session bound to a worktree is shutting
+   * down, keep/remove it. A clean owned worktree is removed without asking.
+   * Anything dirty is kept unless the user confirms removal — a TUI prompt is
+   * time-boxed so an interactive quit (pi stops the TUI before session_shutdown
+   * there) degrades to "keep" rather than destroying work or hanging exit.
+   */
+  pi.on("session_shutdown", async (event: SessionShutdownEvent, ctx) => {
+    if (event.reason !== "quit" || !active) return;
+    const state = active;
+    const counts = await worktreeChanges(state.worktreePath, state.baseCommit);
+    let action = chooseExitAction(counts, state.enteredExisting);
+    const dirty =
+      counts !== null && (counts.changedFiles > 0 || counts.commits > 0);
+    if (action === "keep" && dirty && ctx.hasUI) {
+      const keep = await timeBoxedKeepOrRemove(
+        ctx,
+        "Exit worktree session",
+        `${state.worktreePath} has ${
+          counts!.commits > 0
+            ? `${counts!.commits} ${counts!.commits === 1 ? "commit" : "commits"}`
+            : "uncommitted changes"
+        }${counts!.changedFiles > 0 ? " and uncommitted files" : ""}. Keep the worktree and its branch, or remove them? Removing discards this work permanently.`,
+      );
+      action = keep ? "keep" : "remove";
+    }
+    try {
+      const result = await exitWorktree(
+        {
+          sessionCwd: state.sessionCwd,
+          sessionId: state.sessionId,
+          stateDir: agentDir,
+          config,
+        },
+        {
+          action,
+          discard_changes: true,
+        },
+      );
+      active = null;
+      refreshStatus(ctx);
+      if (ctx.hasUI) ctx.ui.notify(result.message, "info");
+    } catch {
+      // Leave active untouched; the worktree stays on disk either way.
+    }
   });
 
   /**

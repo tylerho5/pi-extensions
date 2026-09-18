@@ -41,6 +41,8 @@ import {
   ConcurrencyLimitError,
   SendError,
   SpawnError,
+  SUBAGENT_NAME_ERROR,
+  SUBAGENT_NAME_PATTERN,
 } from "./domain.ts";
 import { reportRunning } from "../../shared/agent-activity.ts";
 
@@ -61,9 +63,9 @@ function bounded(text: string) {
 }
 
 /**
- * Stable, readable id slug from a title: lowercase alphanumerics and
- * hyphens only. Titles the model writes make ids like `sa-refactor-util`
- * instead of opaque `sa-7` counters.
+ * Id slug for extension-generated titles (btw asides): lowercase alphanumerics
+ * and hyphens only. Model-chosen names skip this — they are used verbatim as
+ * ids after SUBAGENT_NAME_PATTERN validation, matching Claude Code.
  */
 export function slugifyTitle(title: string) {
   const slug = title
@@ -455,6 +457,15 @@ const makeManager = Effect.gen(function* () {
 
   const spawn = (backendName: BackendName, task: SpawnTask) =>
     Effect.gen(function* () {
+      // Fail fast on invalid names before reserving a concurrency slot.
+      // Claude Code enforces this shape and uses the name as the id verbatim;
+      // btw titles are extension-generated and slugified instead.
+      if (
+        (task.origin ?? "model") !== "btw" &&
+        !SUBAGENT_NAME_PATTERN.test(task.title)
+      ) {
+        return yield* new SpawnError({ message: SUBAGENT_NAME_ERROR });
+      }
       // Reserve synchronously (before the first yield inside doSpawn) so
       // parallel tool calls cannot race past the global cap.
       yield* Effect.suspend(
@@ -500,10 +511,12 @@ const makeManager = Effect.gen(function* () {
         }
 
         const origin = task.origin ?? "model";
-        const prefix = origin === "btw" ? "btw" : "sa";
-        const slug = slugifyTitle(task.title);
-        let id = `${prefix}-${slug}`;
-        for (let n = 2; takenIds.has(id); n++) id = `${prefix}-${slug}-${n}`;
+        // Claude Code names agents verbatim: no prefix, no slug. Only
+        // extension-generated titles (btw asides, free-form questions) get
+        // slugified into a valid id shape.
+        const base = origin === "btw" ? slugifyTitle(task.title) : task.title;
+        let id = base;
+        for (let n = 2; takenIds.has(id); n++) id = `${base}-${n}`;
         takenIds.add(id);
         const meta = yield* session.meta;
         const entry: Entry = {

@@ -9,8 +9,8 @@
  * deltas (announced-name tracking) and reset their state on session start.
  *
  * The extension itself registers nothing — it is the injector. Consumers
- * register generators through the shared registry, e.g. the MCP adapter's
- * deferred-tools delta announcements.
+ * register generators through the shared registry; none does at present (see
+ * docs/reminders.md → Consumers).
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

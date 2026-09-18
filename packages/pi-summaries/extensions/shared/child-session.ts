@@ -21,6 +21,7 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
   "ask_user",
   "enter_worktree",
   "exit_worktree",
+  "code_review",
 ] as const;
 
 /** Fresh SDK options avoid turning the denylist into an accidental allowlist. */

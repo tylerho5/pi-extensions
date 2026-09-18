@@ -10,7 +10,9 @@ export const ENTER_WORKTREE_PROMPT_GUIDELINES = [
   "Leave a worktree with exit_worktree when the work is done. Before removing a worktree that has uncommitted files or unpushed commits, confirm with the user and pass discard_changes: true.",
 ];
 
-export const EXIT_WORKTREE_TOOL_DESCRIPTION = `Exits a worktree session created by enter_worktree and restores the original working directory. action "keep" leaves the worktree and its branch on disk; "remove" deletes both. Set discard_changes: true when removing a worktree with uncommitted files or unmerged commits, and only after confirming with the user.`;
+export const EXIT_WORKTREE_TOOL_DESCRIPTION = `Exits a worktree session created by enter_worktree and restores the original working directory. action "keep" leaves the worktree and its branch on disk; "remove" deletes both. Set discard_changes: true when removing a worktree with uncommitted files or unmerged commits, and only after confirming with the user.
+
+On session exit, if the session is still in a worktree you created, the worktree is removed automatically when it is clean (no uncommitted files, no commits ahead of what it was branched from); otherwise you are prompted to keep or remove it.`;
 
 export const EXIT_WORKTREE_PROMPT_SNIPPET = "Leave the active worktree session";
 

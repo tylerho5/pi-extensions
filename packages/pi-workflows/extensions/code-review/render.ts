@@ -6,7 +6,12 @@
 
 import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
 import { Container, Text } from "@earendil-works/pi-tui";
-import type { Finding, FindingsReport } from "./findings.ts";
+import type {
+  CompletionNotification,
+  FailureNotification,
+  Finding,
+  FindingsReport,
+} from "./findings.ts";
 
 const OUTCOME_GLYPH: Record<NonNullable<Finding["outcome"]>, string> = {
   fixed: "✓",
@@ -52,6 +57,22 @@ function rowLine(f: Finding, theme: Theme): string {
     : "";
   return `  ${dot} ${loc} ${cat}${verdict}${outcome}  ${theme.fg("toolOutput", f.short_summary)}`;
 }
+
+export const renderCompletionNotification: MessageRenderer<
+  CompletionNotification
+> = (message, _options, theme) => {
+  const content = typeof message.content === "string" ? message.content : "";
+  return new Text(theme.fg("accent", content), 0, 0);
+};
+
+export const renderFailureNotification: MessageRenderer<FailureNotification> = (
+  message,
+  _options,
+  theme,
+) => {
+  const content = typeof message.content === "string" ? message.content : "";
+  return new Text(theme.fg("error", content), 0, 0);
+};
 
 export const renderFindings: MessageRenderer<FindingsReport> = (
   message,

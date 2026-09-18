@@ -4,7 +4,7 @@ import { MAX_RUNNING } from "./manager.ts";
 
 /** Describes subagent_spawn, including harnesses and the fixed concurrency cap. */
 export const SUBAGENT_SPAWN_TOOL_DESCRIPTION =
-  "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. You choose the harness it runs on: pi (in-process pi session, inherits this environment's tools and config) or claude (Claude Code). Fire-and-forget: this returns immediately with an id derived from the name (e.g. name \"refactor util\" gives `sa-refactor-util`). The subagent's final output is queued back to you as a message when it settles, or collect it explicitly with subagent_wait. Children cannot orchestrate more agents/workflows or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Max ${MAX_RUNNING} subagents can be running at once across all harnesses.";
+  "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. You choose the harness it runs on: pi (in-process pi session, inherits this environment's tools and config) or claude (Claude Code). Fire-and-forget: this returns immediately with the name as its id verbatim (e.g. name \"fix-login-bug\" gives id `fix-login-bug`). The subagent's final output is queued back to you as a message when it settles, or collect it explicitly with subagent_wait. Children cannot orchestrate more agents/workflows or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Max ${MAX_RUNNING} subagents can be running at once across all harnesses.";
 
 /** Adds background subagent delegation to the parent model's available-tools prompt. */
 export const SUBAGENT_SPAWN_PROMPT_SNIPPET =
@@ -22,7 +22,7 @@ export const SUBAGENT_SPAWN_PROMPT_GUIDELINES = [
 export const SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS = {
   prompt:
     "Task prompt for the subagent. Must be self-contained: include all needed context, file paths, and what to report back.",
-  name: "Short human-readable name for this subagent, shown in listings and the UI",
+  name: 'Name for the spawned agent, used as its id verbatim. Must start with a letter or digit and contain only letters, digits, underscores, or hyphens (max 64 chars), e.g. "fix-login-bug". Use the id with subagent_wait, subagent_check, and subagent_cancel.',
   harness:
     'Harness to run the subagent on: "pi" (in-process pi session; inherits this environment) or "claude" (Claude Code). Choose deliberately per task.',
   workingDir:
@@ -53,7 +53,7 @@ export const SUBAGENT_WAIT_TOOL_DESCRIPTION =
 
 /** Model-facing schema description for the subagent ids to await. */
 export const SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS = {
-  ids: 'Subagent ids to wait for, e.g. ["sa-refactor-util"]',
+  ids: 'Subagent ids to wait for, e.g. ["fix-login-bug"]',
 };
 
 /** Describes aborting running subagents while retaining their partial transcripts. */
@@ -62,7 +62,7 @@ export const SUBAGENT_CANCEL_TOOL_DESCRIPTION =
 
 /** Model-facing schema description for the subagent ids to cancel. */
 export const SUBAGENT_CANCEL_PARAMETER_DESCRIPTIONS = {
-  ids: 'Subagent ids to cancel, e.g. ["sa-refactor-util"]',
+  ids: 'Subagent ids to cancel, e.g. ["fix-login-bug"]',
 };
 
 /** Describes nonblocking inspection of a subagent without consuming its result. */

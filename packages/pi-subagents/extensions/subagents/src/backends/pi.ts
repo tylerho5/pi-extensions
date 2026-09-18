@@ -61,6 +61,7 @@ const CHILD_EXCLUDED_TOOL_NAMES = [
   "subagent_list",
   "workflow",
   "ask_user",
+  "code_review",
 ] as const;
 
 // --- Model + effort resolution -----------------------------------------------

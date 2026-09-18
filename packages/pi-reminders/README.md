@@ -10,7 +10,7 @@ Injects dynamic system-reminder messages before each LLM call from a shared gene
 
 # Reminders (system-reminder injector)
 
-Claude Code's system-reminder mechanism for pi: before every LLM call (the `context` event), runs every registered reminder generator from the shared registry (`shared/reminders.ts`) and appends their output as a single hidden `<system-reminder>` user message. The extension itself registers no tools, commands, or shortcuts — it is purely the **injector**; consumers (e.g. the MCP adapter) register generators through the registry. Exists so dynamic per-request facts (tool-pool changes, connect/disconnect, standing nudges) reach the model without rebuilding the cached system prompt.
+Claude Code's system-reminder mechanism for pi: before every LLM call (the `context` event), runs every registered reminder generator from the shared registry (`shared/reminders.ts`) and appends their output as a single hidden `<system-reminder>` user message. The extension itself registers no tools, commands, or shortcuts — it is purely the **injector**; consumers register generators through the registry (none does at present — see Consumers). Exists so dynamic per-request facts (tool-pool changes, connect/disconnect, standing nudges) reach the model without rebuilding the cached system prompt.
 
 ## Key concepts
 
@@ -19,7 +19,7 @@ Claude Code's system-reminder mechanism for pi: before every LLM call (the `cont
 - **Interval clock.** One install-wide `callCount` increments per `context` event. Per generator, `lastInjectedAt` records the call count of its **last actual emission** (not last compute). A generator with `interval: N` is forced (`compute(true)`) when `callCount - lastInjected >= N`. Because the clock only advances on emission, a generator that returns `null` even when forced is re-forced on every subsequent call until it speaks — `interval` means "keep offering the floor every N calls until you emit", matching its docstring "Re-run compute(force=true) every N LLM calls, even when it returned null".
 - **Delta-based.** `createAnnouncedDelta` tracks an announced-name set. `getBaseline()` names are seeded silently (the standing prompt — e.g. a tool description — already lists them); only post-baseline adds/removes produce reminders; silence otherwise. `compute(force)` returns `null` when forced — standing intervals are meaningless for deltas. `reset()` re-reads `getBaseline()` fresh (not frozen), so a new session re-announces the current pool.
 - **Session-scoped.** `pi.on("session_start")` calls `resetReminderGenerators()` (each generator's `reset?.()`, re-seeding announced sets), clears `lastInjectedAt`, and zeroes `callCount`. A new session re-announces state that is already in the conversation.
-- **Inert without consumers.** `getReminderGenerators()` empty → the `context` handler returns immediately; registration is always safe even if this extension is absent (consumers like the MCP adapter use a guarded dynamic import). Blank output (`text.trim().length === 0`) is skipped.
+- **Inert without consumers.** `getReminderGenerators()` empty → the `context` handler returns immediately; registration is always safe even if this extension is absent (a package outside the extension tree uses a guarded dynamic import). Blank output (`text.trim().length === 0`) is skipped.
 - **Literal text transport.** The tag travels as plain text in a `user`-role message — pi maps custom messages to user-role text, and reasoning-capable models treat the tags as instructions regardless of provider. Don't conflate with the **memory** extension's recall injection: that is a separate mechanism (its own `<system-reminder>` wrapping injected at `before_agent_start`), not this registry.
 
 ## API
@@ -46,7 +46,7 @@ Extensions and packages use this module, never the injector. Full reference in `
 - `resetReminderGenerators(): void` — calls `reset?.()` on every generator (used by the injector on `session_start`).
 - `createAnnouncedDelta({ id, getCurrent, getBaseline?, renderAdded, renderRemoved }): ReminderGenerator` — announced-name tracking: `getCurrent: () => readonly string[]` is the tracked pool; `getBaseline?: () => readonly string[]` seeds the announced set silently (re-evaluated on reset); `renderAdded`/`renderRemoved: (names) => string` format the delta text. Returns `null` when nothing changed or when forced.
 
-The generator registry (`registerReminderGenerator`/`unregisterReminderGenerator`/`getReminderGenerators`/`resetReminderGenerators`) is backed by a `globalThis` slot (`Symbol.for("pi.shared.reminders.generators")`), so the injector and a separately-installed package (e.g. `pi-mcp-adapter`) resolve the same registry even across duplicated module instances.
+The generator registry (`registerReminderGenerator`/`unregisterReminderGenerator`/`getReminderGenerators`/`resetReminderGenerators`) is backed by a `globalThis` slot (`Symbol.for("pi.shared.reminders.generators")`), so the injector and a separately-installed package (e.g. one under `npm/node_modules`) resolve the same registry even across duplicated module instances.
 
 ## Examples
 
@@ -61,18 +61,18 @@ registerReminderGenerator({
 });
 ```
 
-Announce pool changes with baseline seeding (the MCP-adapter pattern) — names already in the standing prompt are seeded silently; only post-baseline changes remind:
+Announce pool changes with baseline seeding — names already in the standing prompt are seeded silently; only post-baseline changes remind:
 
 ```ts
 registerReminderGenerator(
   createAnnouncedDelta({
-    id: "mcp-deferred-tools",
-    getCurrent: () => [...deferredTools.keys()],
-    getBaseline: () => [...deferredTools.keys()],
+    id: "available-tools",
+    getCurrent: () => [...pooledTools.keys()],
+    getBaseline: () => [...promptedToolNames],
     renderAdded: (names) =>
-      `New MCP tools are now available: ${names.join(", ")}. Their schemas are NOT loaded — select them with mcp({ select: "name" }) (batch multiple names into one call) to make them callable directly by name.`,
+      `New tools are now available: ${names.join(", ")}. Their schemas are NOT in the prompt — activate them before calling by name.`,
     renderRemoved: (names) =>
-      `The following MCP tools are no longer available: ${names.join(", ")}. Do not search for them — mcp({ search }) will return no match.`,
+      `The following tools are no longer available: ${names.join(", ")}.`,
   }),
 );
 ```
@@ -81,7 +81,7 @@ What the model actually receives (two generators speaking on one call → one ba
 
 ```text
 <system-reminder>
-New MCP tools are now available: notion_notion-create-attachment, slack_slack_create_canvas.
+New tools are now available: notion_create_page, slack_send_message.
 
 Reminder: never run `git push` without asking first.
 </system-reminder>
