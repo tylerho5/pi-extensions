@@ -1,8 +1,8 @@
 /**
  * The findings store, the `report_findings` tool, and the shared presentation
- * path. Both the post-run auto-presentation and the model-facing tool write the
- * same store and emit the same `code-review-findings` message (rendered by
- * render.ts), so `--fix` re-reports update rows by key instead of duplicating.
+ * path. The model-facing tool writes the store and emits the
+ * `code-review-findings` message (rendered by render.ts), so `--fix` re-reports
+ * update rows by key instead of duplicating.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -10,7 +10,11 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import type { Effort } from "./command.ts";
 import { COMMENT_APPENDIX, FIX_APPENDIX } from "./prompts.ts";
-import { renderFindings } from "./render.ts";
+import {
+  renderCompletionNotification,
+  renderFailureNotification,
+  renderFindings,
+} from "./render.ts";
 import type { ReviewScope } from "./target.ts";
 
 export interface Finding {
@@ -29,6 +33,17 @@ export interface Finding {
 export interface FindingsReport {
   level?: Effort;
   findings: Finding[];
+}
+
+export interface CompletionNotification {
+  level: Effort;
+  findings: Finding[];
+  instruction?: string;
+}
+
+export interface FailureNotification {
+  runId: string;
+  error: string;
 }
 
 export interface FindingsStore {
@@ -131,8 +146,77 @@ export function findingsSummaryText(store: FindingsStore): string {
 
 /**
  * Merge findings into the store and emit/refresh the rendered findings message.
- * Used by both the post-run auto-presentation and the report_findings tool.
  */
+export function formatCompletionNotification(
+  notification: CompletionNotification,
+): string {
+  const level = ` — ${notification.level}`;
+  if (notification.findings.length === 0) {
+    return `## Code review complete${level}\n\nNo findings.`;
+  }
+  const findings = notification.findings
+    .map((f, i) => {
+      const verdict = f.verdict ? `\n   Verdict: ${f.verdict}` : "";
+      return [
+        `${i + 1}. ${f.file}:${f.line} [${f.category}]`,
+        `   Summary: ${f.summary}`,
+        `   Short summary: ${f.short_summary}`,
+        `   Failure scenario: ${f.failure_scenario}`,
+        verdict.trimStart(),
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n");
+  const content = `## Code review complete${level}\n\n${findings}`;
+  return notification.instruction
+    ? `${content}\n\n${notification.instruction}`
+    : content;
+}
+
+export function deliverCompletionNotification(
+  pi: ExtensionAPI,
+  notification: CompletionNotification,
+): void {
+  pi.sendMessage(
+    {
+      customType: "code-review-completion",
+      display: true,
+      content: formatCompletionNotification(notification),
+      details: notification,
+    },
+    { deliverAs: "followUp", triggerTurn: true },
+  );
+}
+
+/** Model-facing text for a failed background run (the renderer shows the summary). */
+export function formatFailureNotification(
+  notification: FailureNotification,
+): string {
+  return [
+    "## Code review failed",
+    "",
+    `The review run ${notification.runId} did not complete: ${notification.error}`,
+    "",
+    `Tell the user the review failed and point them at /workflows ${notification.runId}. Do not call report_findings.`,
+  ].join("\n");
+}
+
+export function deliverFailureNotification(
+  pi: ExtensionAPI,
+  notification: FailureNotification,
+): void {
+  pi.sendMessage(
+    {
+      customType: "code-review-failure",
+      display: true,
+      content: formatFailureNotification(notification),
+      details: notification,
+    },
+    { deliverAs: "followUp", triggerTurn: true },
+  );
+}
+
 export function presentFindings(
   pi: ExtensionAPI,
   store: FindingsStore,
@@ -211,5 +295,13 @@ export function registerReportFindings(pi: ExtensionAPI, store: FindingsStore) {
   pi.registerMessageRenderer<FindingsReport>(
     "code-review-findings",
     renderFindings,
+  );
+  pi.registerMessageRenderer<CompletionNotification>(
+    "code-review-completion",
+    renderCompletionNotification,
+  );
+  pi.registerMessageRenderer<FailureNotification>(
+    "code-review-failure",
+    renderFailureNotification,
   );
 }

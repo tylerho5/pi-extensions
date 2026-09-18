@@ -9,7 +9,8 @@ import type {
 // stash on process restart.
 let stashed: string | undefined;
 
-// A held ctrl+s autorepeats (kitty CSI-u event type 2, or legacy raw bytes) and
+// A held ctrl+shift+s autorepeats (kitty CSI-u event type 2, or legacy raw
+// bytes) and
 // pi's TUI filters key releases but not repeats, so the shortcut would cycle
 // stash -> restore while the key is held. Suppress toggles inside this window;
 // events keep updating lastToggleAt so a long hold stays suppressed.
@@ -21,7 +22,7 @@ export function shouldToggle(now: number, lastToggleAtMs: number) {
 }
 
 /**
- * Claude Code's chat:stash semantics (ctrl+s):
+ * Claude Code's chat:stash semantics (CC binds ctrl+s; here ctrl+shift+s):
  * - editor has text -> save it (raw, untrimmed), clear the editor. A second
  *   stash overwrites the first: single slot, no stack.
  * - editor empty (or whitespace-only) + stash exists -> restore it, clear the slot.
@@ -71,14 +72,14 @@ async function toggleStash(ctx: ExtensionContext) {
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerShortcut("ctrl+s", {
+  pi.registerShortcut("ctrl+shift+s", {
     description: "Stash the current prompt draft, or restore the stashed draft",
     handler: toggleStash,
   });
 
   pi.registerCommand("stash", {
     description:
-      "Stash the current prompt draft, or restore the stashed draft (same as ctrl+s)",
+      "Stash the current prompt draft, or restore the stashed draft (same as ctrl+shift+s)",
     handler: async (_args, ctx) => toggleStash(ctx),
   });
 }

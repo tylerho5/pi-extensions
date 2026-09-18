@@ -117,12 +117,19 @@ export function parseArgs(raw: string): ParsedArgs {
   };
 }
 
+export function resolveEffortInput(
+  explicit?: Effort,
+  lastUsed?: Effort,
+): ResolvedEffort {
+  if (explicit) return { level: explicit, source: "explicit" };
+  if (lastUsed) return { level: lastUsed, source: "last-used" };
+  return { level: "medium", source: "default" };
+}
+
 export function resolveEffort(
   parsed: ParsedArgs,
   lastUsed?: Effort,
 ): ResolvedEffort {
   if (parsed.ultra) return { level: "max", source: "ultra" };
-  if (parsed.explicit) return { level: parsed.explicit, source: "explicit" };
-  if (lastUsed) return { level: lastUsed, source: "last-used" };
-  return { level: "medium", source: "default" };
+  return resolveEffortInput(parsed.explicit, lastUsed);
 }

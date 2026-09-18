@@ -16,6 +16,17 @@ import { Data } from "effect";
 export const BACKEND_NAMES = ["pi", "claude"] as const;
 export type BackendName = (typeof BACKEND_NAMES)[number];
 
+/**
+ * Claude Code's subagent-name shape: letter/digit start, then letters, digits,
+ * underscores, or hyphens; max 64 chars. Enforced on model-chosen names; the
+ * name becomes the id verbatim (no prefix, no slug).
+ */
+export const SUBAGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+/** Rejection message for names that fail SUBAGENT_NAME_PATTERN (Claude Code's wording). */
+export const SUBAGENT_NAME_ERROR =
+  "name must start with a letter or digit and contain only letters, digits, underscores, or hyphens (max 64 chars)";
+
 /** Who initiated the session. User asides stay out of model-facing tooling. */
 export type SubagentOrigin = "model" | "btw";
 

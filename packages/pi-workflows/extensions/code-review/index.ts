@@ -4,14 +4,18 @@
  * shared workflow-runtime (tracked live in /workflows), and renders findings
  * via the report_findings tool + renderer. The command turn never blocks on the
  * review; findings are presented when the run settles.
+ *
+ * The launch lifecycle itself lives in launch.ts, shared with the model-facing
+ * `code_review` tool. This module keeps the command adapter and the wiring.
  */
 
 import { execFile } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { getWorkflowRuntime } from "../shared/workflow-runtime.ts";
 import {
   EFFORT_LEVELS,
   MODES,
@@ -19,20 +23,15 @@ import {
   resolveEffort,
   type ParsedArgs,
 } from "./command.ts";
-import {
-  buildCommentBlock,
-  buildFixFollowUp,
-  createFindingsStore,
-  presentFindings,
-  registerReportFindings,
-  type Finding,
-  type FindingsStore,
-} from "./findings.ts";
-import { reviewOrchestration } from "./orchestrate.ts";
+import { createFindingsStore, registerReportFindings } from "./findings.ts";
+import { createReviewLauncher, type ReviewLauncher } from "./launch.ts";
 import { loadLastEffort, saveLastEffort } from "./state.ts";
-import { resolveScope, type Runner } from "./target.ts";
+import type { Runner } from "./target.ts";
+import { registerCodeReviewTool } from "./tool.ts";
 
 const COMPLETIONS = [...EFFORT_LEVELS, ...MODES, "ultra", "--fix", "--comment"];
+
+const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 
 /** Real command runner: argv (no shell) with a large buffer for big diffs. */
 const exec: Runner = (cmd, cwd) =>
@@ -66,98 +65,33 @@ function argNotes(parsed: ParsedArgs): string[] {
   return notes;
 }
 
-/** Best-effort `owner/repo` for --comment; a placeholder when gh can't resolve it. */
-async function resolveRepoSlug(run: Runner, cwd: string): Promise<string> {
-  const { stdout, code } = await run(
-    ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-    cwd,
-  );
-  return code === 0 && stdout.trim() ? stdout.trim() : "{owner}/{repo}";
-}
-
 export function createReviewHandler(
-  pi: ExtensionAPI,
-  store: FindingsStore,
-  run: Runner,
-) {
+  launch: ReviewLauncher,
+): (rawArgs: string, ctx: ExtensionCommandContext) => Promise<void> {
   return async (rawArgs: string, ctx: ExtensionCommandContext) => {
     const parsed = parseArgs(rawArgs);
     const resolved = resolveEffort(parsed, loadLastEffort());
     if (parsed.explicit) await saveLastEffort(parsed.explicit);
 
-    const rt = getWorkflowRuntime();
-    if (!rt) {
-      ctx.ui.notify(
-        "code-review needs the workflows extension, which is unavailable",
-        "error",
-      );
-      return;
-    }
-
     for (const note of argNotes(parsed)) ctx.ui.notify(note, "warning");
 
-    const scope = await resolveScope(parsed.target, ctx.cwd, run);
-
-    const wantComment = parsed.comment && scope.isPr;
-    if (parsed.comment && !scope.isPr)
-      ctx.ui.notify("--comment ignored (target is not a PR)", "warning");
-    const repoSlug = wantComment ? await resolveRepoSlug(run, ctx.cwd) : "";
-
-    // Start each review from a clean store; a later --fix report_findings merges
-    // outcomes into these rows.
-    store.findings = [];
-    store.level = resolved.level;
-
-    // Inline runs as a single "Review" agent (except low, which is already a
-    // single agent on the shared Find/Verify/Sweep path).
-    const inlineSingle = parsed.mode === "inline" && resolved.level !== "low";
-    const phases = inlineSingle
-      ? [{ title: "Review" }]
-      : [{ title: "Find" }, { title: "Verify" }, { title: "Sweep" }];
-
-    const handle = rt.launch<Finding[]>(
-      {
-        meta: {
-          name: `code-review: ${scope.label}`,
-          phases,
+    try {
+      await launch(
+        {
+          target: parsed.target,
+          level: resolved.level,
+          mode: parsed.mode,
+          fix: parsed.fix,
+          comment: parsed.comment,
         },
-        background: true,
-        delivery: "programmatic",
-        orchestrate: (dsl) =>
-          reviewOrchestration(dsl, {
-            level: resolved.level,
-            scope,
-            mode: parsed.mode,
-          }),
-      },
-      ctx,
-    );
-
-    ctx.ui.notify(
-      `Reviewing ${scope.label} at ${resolved.level} (${parsed.mode}) — see /workflows`,
-      "info",
-    );
-
-    // Do not block the turn: present findings when the run settles.
-    void handle.settled.then((outcome) => {
-      if (outcome.status !== "completed") {
-        ctx.ui.notify(
-          `Review ${outcome.status}: ${outcome.error ?? "no result"}`,
-          "error",
-        );
-        return;
-      }
-      presentFindings(pi, store, resolved.level, outcome.result ?? []);
-      if (wantComment)
-        ctx.ui.notify(
-          buildCommentBlock(store.findings, scope, repoSlug),
-          "info",
-        );
-      if (parsed.fix)
-        pi.sendUserMessage(buildFixFollowUp(store.findings, resolved.level), {
-          deliverAs: "followUp",
-        });
-    });
+        ctx,
+      );
+    } catch (error) {
+      ctx.ui.notify(
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
+    }
   };
 }
 
@@ -165,7 +99,13 @@ export default function codeReview(pi: ExtensionAPI) {
   const store = createFindingsStore();
   registerReportFindings(pi, store);
 
-  const handler = createReviewHandler(pi, store, exec);
+  const launch = createReviewLauncher(pi, store, exec);
+  const handler = createReviewHandler(launch);
+  registerCodeReviewTool(pi, launch);
+
+  pi.on("resources_discover", () => ({
+    skillPaths: [join(EXTENSION_DIR, "skills")],
+  }));
 
   const definition = {
     description:

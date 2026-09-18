@@ -103,10 +103,7 @@ export async function enterWorktree(
   const repoRoot = await getRepoRoot(sessionCwd);
   const store = new WorktreeStateStore(stateDir);
   const stored = store.load();
-  const active =
-    stored && path.resolve(stored.sessionCwd) === path.resolve(sessionCwd)
-      ? stored
-      : null;
+  const active = stored && stored.sessionId === sessionId ? stored : null;
 
   if (input.name !== undefined && input.path !== undefined) {
     throw new WorktreeSessionError(
@@ -277,13 +274,10 @@ export async function exitWorktree(
   deps: WorktreeDeps,
   input: ExitWorktreeInput,
 ): Promise<ExitWorktreeResult> {
-  const { sessionCwd, stateDir } = deps;
+  const { sessionCwd, sessionId, stateDir } = deps;
   const store = new WorktreeStateStore(stateDir);
   const stored = store.load();
-  const active =
-    stored && path.resolve(stored.sessionCwd) === path.resolve(sessionCwd)
-      ? stored
-      : null;
+  const active = stored && stored.sessionId === sessionId ? stored : null;
   if (!active) {
     throw new WorktreeSessionError(
       "No-op: there is no active worktree session to exit. This tool only operates on worktrees created by enter_worktree in the current session — it will not touch worktrees created manually or in a previous session. No filesystem changes were made.",
@@ -393,4 +387,21 @@ export async function exitWorktree(
     discardedCommits,
     message: `Exited worktree but could not remove it — kept at ${worktreePath}. Remove it manually with \`git worktree remove --force ${worktreePath}\`.${cwdNote}`,
   };
+}
+
+/**
+ * Decides the auto exit-action for a session_shutdown, mirroring CC's
+ * WorktreeExitDialog: an owned worktree that is clean (no uncommitted files,
+ * no commits ahead of the base it was branched from) is removed without a
+ * prompt; anything else defaults to keep (never destroy work on a path that
+ * cannot confirm). A non-owner (enteredExisting) worktree is always kept.
+ */
+export function chooseExitAction(
+  counts: WorktreeChangeCounts | null,
+  enteredExisting: boolean,
+): "keep" | "remove" {
+  if (enteredExisting) return "keep";
+  if (counts && counts.changedFiles === 0 && counts.commits === 0)
+    return "remove";
+  return "keep";
 }

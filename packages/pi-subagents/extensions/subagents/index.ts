@@ -494,7 +494,7 @@ export default function (pi: ExtensionAPI) {
         throw new Error(`working_dir is not a directory: ${cwd}`);
       }
 
-      const title = params.name.trim().slice(0, 160) || "subagent";
+      const title = params.name.trim() || "subagent";
       const snap = await runTool(
         getRuntime(),
         manager.spawn(harness, {
