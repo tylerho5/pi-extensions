@@ -29,6 +29,8 @@ export interface AnswerEntryData {
   questions: AnswerEntryQuestion[];
   /** Every question skipped without an answer, or the whole questionnaire dismissed. */
   dismissed: boolean;
+  /** True when the user ended the dialog to talk about the questions instead. */
+  chat?: boolean;
   globalNote?: string;
 }
 
@@ -47,6 +49,7 @@ interface QuestionnaireResultLike {
     notes?: unknown;
   }[];
   cancelled?: unknown;
+  chat?: unknown;
   globalNote?: unknown;
 }
 
@@ -94,6 +97,7 @@ export function buildAnswerEntryData(
     questions,
     dismissed: result.cancelled === true,
   };
+  if (result.chat === true) data.chat = true;
   const globalNote = text(result.globalNote);
   if (globalNote) data.globalNote = globalNote;
   return data;
@@ -152,12 +156,13 @@ export function renderAnswerEntry(
   ).length;
 
   const summary =
-    answered === 0
-      ? data.dismissed
-        ? `dismissed all ${asked}`
-        : `${asked} asked, none answered`
-      : `${asked} asked, ${answered} answered`;
+    data.dismissed && !data.chat
+      ? `dismissed all ${asked}`
+      : answered === 0
+        ? `${asked} asked, none answered`
+        : `${asked} asked, ${answered} answered`;
   const extras: string[] = [];
+  if (data.chat) extras.push("ended in chat");
   if (notes > 0) extras.push(`${notes} note${notes === 1 ? "" : "s"}`);
   if (data.globalNote) extras.push("global note");
 

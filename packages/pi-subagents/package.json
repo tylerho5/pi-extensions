@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-subagents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Background subagents on a pi or Claude Code backend, with fire-and-forget spawn and deferred result delivery.",
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-ask-user-question",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Claude Code-shaped batch questions: 1-4 per call, each with a header, 2-4 options, optional multi-select and per-option previews.",
   "license": "MIT",

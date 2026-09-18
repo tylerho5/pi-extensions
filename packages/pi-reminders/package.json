@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-reminders",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Injects dynamic system-reminder messages before each LLM call from a shared generator registry.",
   "license": "MIT",
