@@ -10,20 +10,21 @@ Claude Code-shaped batch questions: 1-4 per call, each with a header, 2-4 option
 
 # Ask User Question
 
-A batch question tool for the model: `ask_user_question` puts 1–4 structured questions to the user in one tabbed dialog, each with a short header and 2–4 options, optional multi-select, optional per-option markdown previews, and per-answer notes. The dialog closes with either the answers, a custom answer, or an explicit dismissal.
+A batch question tool for the model: `ask_user_question` puts 1–4 structured questions to the user in one tabbed dialog, each with a short header and 2–4 options, optional multi-select, optional per-option markdown previews, and per-answer notes. The dialog closes with either the answers, a custom answer, an explicit dismissal, or a request to talk the questions over instead (ctrl+r).
 
 The implementation is upstream [`@juicesharp/rpiv-ask-user-question`](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) 2.10.1. This extension exists to own the model-facing text: upstream ships roughly 1,245 tokens of always-on tool definition (a 1,641-character description, four guidelines totalling 1,214 characters, and a schema whose every field carries a paragraph), and `prompt.ts` here restates the load-bearing facts in about 513 tokens. Everything else — the dialog, the state machine, the RPC fallback, the renderers — is upstream's code.
 
 ## Key concepts
 
 - **Batch, not one-at-a-time.** One call takes 1–4 questions. The dialog renders them as tabs with a Submit step, so the user answers a related set of decisions in one pass. This is Claude Code's `AskUserQuestion` shape, and the reason this replaced the local single-question `ask_user`.
-- **Upstream registers the tool; this extension retunes it.** `index.ts` wraps `pi` in a `Proxy` and intercepts `registerTool`, replacing description, snippet and guidelines from `prompt.ts`, tightening the header cap to 12 characters, and stripping paragraph-length field descriptions from the schema. `execute`, the renderers and the reconciler stay upstream's.
+- **Upstream registers the tool; this extension retunes it.** `index.ts` wraps `pi` in a `Proxy` and intercepts `registerTool`, replacing description, snippet and guidelines from `prompt.ts`, tightening the header cap to 12 characters, and stripping paragraph-length field descriptions from the schema. The renderers and the reconciler stay upstream's; `execute` is upstream's wrapped twice, for the chat action and the transcript record.
 - **Upstream is a dependency, not an installed package.** Installing `@juicesharp/rpiv-ask-user-question` as a pi package would register `ask_user_question` a second time; pi resolves same-name collisions by unsorted directory read order, so which registration won would be luck. It is declared in `~/.pi/agent/package.json` and imported directly.
 - **The free-form row is always appended** and its label is reserved. The model must never author `Other` or `Type something.`; upstream rejects reserved labels at runtime.
 - **Previews are single-select only.** A preview with any option present switches the dialog to a side-by-side layout (options left, markdown right). Multi-select questions cannot show one.
 - **Dialogs are serialized.** The tool sets `executionMode: "sequential"`, because two overlapping dialogs fight over pi's single editor slot and orphan the first component, whose `done` never fires. Upstream does not set this itself.
+- **ctrl+r ends the dialog as a chat.** Claude Code appends a `Chat about this` row to every single-select question; picking it abandons the questionnaire and gives the model a feedback message restating each question with the answer given so far (or `(No answer provided)`) under "The user wants to clarify these questions." Upstream has no row kind for that and no seam to add one, so `chat.ts` reaches the same outcome through a raw input listener instead: ctrl+r is rewritten to Escape (upstream's cancel action, which preserves the answers given), the dialog renders one appended hint row naming the key, and the cancelled result is reshaped into Claude Code's feedback text before the model sees it. The user's answers are not lost — they ride the tool result's `details` and the transcript record, marked `chat` so a chat does not read as a dismissal.
 - **Every finished questionnaire leaves a transcript record.** `recordQuestionnaire` in `transcript.ts` wraps the tool's `execute`: once upstream resolves, it appends an `ask-user-answers` entry holding the questions, answers, notes and any global note, then returns upstream's result untouched. Collapsed, the row reads `◆ ask_user_question · 3 asked, 2 answered · 1 note`; ctrl+o expands to the per-question list, where a skipped question shows as `→ no answer`. Entry data stays out of LLM context and is written to the session, so the record survives a restart. Previews are deliberately not recorded — an answer can carry thousands of characters of preview, and the model-facing envelope already echoes it.
-- **Config file.** Upstream reads `~/.config/rpiv-ask-user-question/config.json` (XDG-aware). Its `guidance.description` / `promptSnippet` / `promptGuidelines` are overwritten by this extension, so wording is tuned in `prompt.ts` and nowhere else. `collapseKey` (default `ctrl+]`) still applies from that file.
+- **Config file.** Upstream reads `~/.config/rpiv-ask-user-question/config.json` (XDG-aware). Its `guidance.description` / `promptSnippet` / `promptGuidelines` are overwritten by this extension, so wording is tuned in `prompt.ts` and nowhere else. `collapseKey` still applies from that file, and is set to `ctrl+j` here, replacing upstream's default `ctrl+]`. Binding ctrl+j is not free on a legacy terminal: ctrl+j sends the same `\n` byte as Ghostty's shift+enter mapping, and pi-tui matches that byte as ctrl+j in both kitty-protocol and legacy modes, so a `\n` produced by a text mapping collapses the dialog rather than adding a line.
 
 ### Deliberate divergences from Claude Code
 
@@ -31,6 +32,7 @@ The implementation is upstream [`@juicesharp/rpiv-ask-user-question`](https://ww
 |---|---|---|
 | Header cap | 12 characters; stated in the description, enforced at the plugin API, not in the schema | 12 in the field description and `maxLength`; upstream still tolerates up to 16 at runtime, so an over-long header renders wide rather than failing the call |
 | Free-form row label | `Other` | `Type something.` — upstream's label is an inline literal in its locale files, not configuration; matching CC's word would mean forking the package |
+| Chat escape | A `Chat about this` row on every single-select question | ctrl+r, with a hint row naming it: upstream's row union is closed at `option`/`other`/`next`, so a real row would mean reimplementing its dialog wiring. The model-facing result is CC's |
 | Result shape | `answers`, per-answer `annotations`, `metadata.source` | upstream's own envelope (`tool/response-envelope.ts`) |
 
 ## API
@@ -56,13 +58,26 @@ Measured against upstream 2.10.1's own strings: 4,980 characters (~1,245 tokens 
 | Piece | Value |
 |---|---|
 | Entry type | `ask-user-answers` (`ASK_USER_ANSWERS_ENTRY`) |
-| Data | `{ questions: [{ header?, question, answer?, notes? }], dismissed, globalNote? }` — one entry per question asked, in order, with `answer` absent when the user skipped it and multi-select answers joined with `, ` |
-| Collapsed | `◆ ask_user_question · <n> asked, <m> answered`, plus `· <k> notes` / `· global note`; `dismissed all <n>` when the questionnaire was dismissed |
+| Data | `{ questions: [{ header?, question, answer?, notes? }], dismissed, chat?, globalNote? }` — one entry per question asked, in order, with `answer` absent when the user skipped it and multi-select answers joined with `, `; `chat: true` when the dialog ended in a chat request |
+| Collapsed | `◆ ask_user_question · <n> asked, <m> answered`, plus `· ended in chat` / `· <k> notes` / `· global note`; `dismissed all <n>` when the questionnaire was dismissed |
 | Expanded | `1. [Header] question` then `→ answer`, `note: …` per answer, `→ no answer` for skips |
 | `buildAnswerEntryData(params, details)` | Pure. Returns `undefined` when no questions were asked, so the caller appends unconditionally. Matches answers by `questionIndex`, falling back to question text. |
-| `recordQuestionnaire(recorder, tool)` | Generic over the tool object, so it preserves renderers and other fields; a recorder that throws is swallowed rather than failing an answered call |
+| `recordQuestionnaire(recorder, tool)` | Generic over the tool object, so it preserves renderers and other fields; a recorder that throws is swallowed rather than failing an answered call; it wraps the chat wrapper, so it records the reshaped result |
 
 Answer semantics, dismissal, custom answers, preview rendering and keyboard model are upstream's: see the package's own `docs/keyboard.md`, `docs/hosts.md`, `docs/tool-schema.md` and `docs/configuration.md`.
+
+### Chat action
+
+`chat.ts` owns the ctrl+r path and needs no upstream types — it reads the params, the tool result and the cancelled result's `details` structurally, so it is testable without the package installed.
+
+| Piece | Value |
+|---|---|
+| `CHAT_RESPOND_KEY` | `ctrl+r` — free inside the dialog, and delivered both as the legacy `0x12` byte and as a kitty-protocol sequence |
+| `buildClarifyText(params, details)` | Pure. Claude Code's preamble, then `- "<question>"` with `Answer: <label>`, `(No answer provided)`, or — for a committed empty custom answer — `(no input)`, plus `User notes:` and a trailing `Global note:` |
+| `clarifyResult(params, result)` | Swaps the envelope text for the clarify text and leaves upstream's `details` intact, adding `chat: true` |
+| `installChatTrigger(ctx)` | Registers `ctx.ui.onTerminalInput`; returns undefined on hosts with no raw input hook (RPC, print), where the tool then behaves exactly as it did before. Guards on the overlay handle so a stacked overlay keeps its keys, and swallows kitty-protocol repeats and releases |
+| `withChatHint(component, theme, trigger)` | Appends `ctrl+r · Chat about this` as one dim row, skipped while collapsed (upstream renders exactly one row then) and once the request has fired |
+| `withChatAction(tool)` | Wraps `execute`: routes `ctx.ui.custom` through the hint wrapper, forwards upstream's own `onHandle`, and converts a chat result |
 
 ## Examples
 

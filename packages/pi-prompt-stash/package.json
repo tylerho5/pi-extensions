@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-prompt-stash",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Saves and restores the editor's draft text in a single slot via ctrl+s, Claude Code style.",
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-web-fetch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Fetches a URL and converts it to markdown, with a Jina reader fallback and an optional cheap-model answer pass.",
   "license": "MIT",
