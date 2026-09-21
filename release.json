@@ -22,6 +22,12 @@
       "builtFrom": {
         "sourceHash": "sha256:e9b63a5ba6d2bcefaad66ce00d0a9426f2383cca70483ea692420ad325bcb283",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.2.1",
+        "sourceHash": "sha256:e9b63a5ba6d2bcefaad66ce00d0a9426f2383cca70483ea692420ad325bcb283",
+        "at": "2026-09-21T03:37:04.150Z",
+        "integrity": "sha512-6HaHMt8M9H5vubPJ6Un353hr5qsn018neqWMkUgnnmVoD4Neh2ep5feW2ATwI6atnYp4MZRdBCYsXKuHv/jUSg=="
       }
     },
     "@tylerho/pi-summaries": {
