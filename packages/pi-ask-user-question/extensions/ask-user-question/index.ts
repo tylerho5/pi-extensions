@@ -12,9 +12,11 @@
  * as a package would register the tool a second time under the same name, and
  * pi resolves that collision by directory read order.
  *
- * Two wrappers ride on top of the tuned tool: `withChatAction` (chat.ts) lets
- * ctrl+r abandon the questionnaire as a request to talk instead, and
- * `recordQuestionnaire` (transcript.ts) records the finished questionnaire.
+ * Three wrappers ride on top of the tuned tool: `withChatAction` (chat.ts) lets
+ * ctrl+r abandon the questionnaire as a request to talk instead,
+ * `withQuietQuestionnaire` (quiesce.ts) freezes the working spinner so the
+ * terminal can scroll while the dialog waits, and `recordQuestionnaire`
+ * (transcript.ts) records the finished questionnaire.
  *
  * Upstream's own `~/.config/rpiv-ask-user-question/config.json` can replace its
  * description, snippet and guidelines. Those values are overwritten here, so
@@ -25,6 +27,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import askUserQuestion from "@juicesharp/rpiv-ask-user-question";
 import { withChatAction } from "./chat.ts";
 import { tuneRegisteredTool } from "./prompt.ts";
+import { withQuietQuestionnaire } from "./quiesce.ts";
 import {
   ASK_USER_ANSWERS_ENTRY,
   type AnswerEntryData,
@@ -48,7 +51,7 @@ export default function askUser(pi: ExtensionAPI) {
           target.registerTool(
             recordQuestionnaire(
               target,
-              withChatAction(tuneRegisteredTool(tool)),
+              withQuietQuestionnaire(withChatAction(tuneRegisteredTool(tool))),
             ),
           );
       }
