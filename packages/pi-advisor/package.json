@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-advisor",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "A stronger reviewer model the main agent can consult mid-turn for strategic guidance, ported from Claude Code.",
   "license": "MIT",
