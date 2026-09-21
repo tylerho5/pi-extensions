@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-workflows",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Sandboxed multi-agent workflow orchestration, plus a deterministic multi-angle code review built on it.",
   "license": "MIT",
