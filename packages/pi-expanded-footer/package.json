@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-expanded-footer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Replaces the default footer with a Claude Code-style layout: model, context usage, cost, branch, worktree.",
   "license": "MIT",
