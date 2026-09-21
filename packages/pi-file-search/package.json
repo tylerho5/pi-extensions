@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-file-search",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Adds native fd and rg tools for fast, gitignore-aware file search with automatic binary resolution.",
   "license": "MIT",
