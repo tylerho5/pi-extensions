@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-21T02:03:36.489Z",
+  "generatedAt": "2026-09-21T02:45:55.810Z",
   "packages": {
     "@tylerho/pi-subagents": {
       "version": "0.2.0",
@@ -166,6 +166,14 @@
       "builtFrom": {
         "sourceHash": "sha256:6e14fcb40d26df755adfba4bb690795a2cc0ec46b4c07b9870595ec4f0de2dd2",
         "at": "2026-09-21T02:03:36.489Z"
+      }
+    },
+    "@tylerho/pi-workflows": {
+      "version": "0.2.0",
+      "status": "stable",
+      "builtFrom": {
+        "sourceHash": "sha256:0f6402d482a128a00ccbb958972217b9bc02131a530f3ba1f05c6100d4237893",
+        "at": "2026-09-21T02:45:55.810Z"
       }
     }
   }
