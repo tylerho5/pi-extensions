@@ -27,7 +27,7 @@ Extensions for the pi coding agent, published as individual npm packages under t
 | [`@tylerho/pi-subagents`](packages/pi-subagents) | no record | Background subagents on a pi or Claude Code backend, with fire-and-forget spawn and deferred result delivery. |
 | [`@tylerho/pi-summaries`](packages/pi-summaries) | published 0.2.1 | Generates a compact recap of each agent run and appends it to the session once the run settles. |
 | [`@tylerho/pi-web-fetch`](packages/pi-web-fetch) | published 0.2.0 | Fetches a URL and converts it to markdown, with a Jina reader fallback and an optional cheap-model answer pass. |
-| [`@tylerho/pi-workflows`](packages/pi-workflows) | no record | Sandboxed multi-agent workflow orchestration, plus a deterministic multi-angle code review built on it. |
+| [`@tylerho/pi-workflows`](packages/pi-workflows) | published 0.2.1 | Sandboxed multi-agent workflow orchestration, plus a deterministic multi-angle code review built on it. |
 | [`@tylerho/pi-worktree`](packages/pi-worktree) | no record | Lets the agent create, enter, and exit isolated git worktrees for parallel work in one repo. |
 
 `no record` = no publish record for the package in this repository's release ledger; it may still be live on npm.
