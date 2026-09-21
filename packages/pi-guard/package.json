@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Prompts for human confirmation before risky git writes, PR publishing, and recursive rm in the bash tool.",
   "license": "MIT",
