@@ -24,7 +24,7 @@ Extensions for the pi coding agent, published as individual npm packages under t
 | [`@tylerho/pi-reminders`](packages/pi-reminders) | no record | Injects dynamic system-reminder messages before each LLM call from a shared generator registry. |
 | [`@tylerho/pi-skill-stack`](packages/pi-skill-stack) | wip (source only) | Expands every skill named in a prompt, so several skills stack in one message before the model reads it. |
 | [`@tylerho/pi-skills-banner-split`](packages/pi-skills-banner-split) ⚠️ | wip (source only) | Splits the startup banner's Skills section into model-invokable and user-invoked groups. |
-| [`@tylerho/pi-subagents`](packages/pi-subagents) | no record | Background subagents on a pi or Claude Code backend, with fire-and-forget spawn and deferred result delivery. |
+| [`@tylerho/pi-subagents`](packages/pi-subagents) | published 0.2.1 | Background subagents on a pi or Claude Code backend, with fire-and-forget spawn and deferred result delivery. |
 | [`@tylerho/pi-summaries`](packages/pi-summaries) | published 0.2.1 | Generates a compact recap of each agent run and appends it to the session once the run settles. |
 | [`@tylerho/pi-web-fetch`](packages/pi-web-fetch) | published 0.2.0 | Fetches a URL and converts it to markdown, with a Jina reader fallback and an optional cheap-model answer pass. |
 | [`@tylerho/pi-workflows`](packages/pi-workflows) | published 0.2.1 | Sandboxed multi-agent workflow orchestration, plus a deterministic multi-angle code review built on it. |

@@ -8,6 +8,12 @@
       "builtFrom": {
         "sourceHash": "sha256:cff6bfe1aed25877549aac1490b6d5021cf1c5b6c8501a159df371702e7741ff",
         "at": "2026-09-21T02:55:22.300Z"
+      },
+      "published": {
+        "version": "0.2.1",
+        "sourceHash": "sha256:cff6bfe1aed25877549aac1490b6d5021cf1c5b6c8501a159df371702e7741ff",
+        "at": "2026-09-21T03:37:02.021Z",
+        "integrity": "sha512-uf0FP/50WtqM0FBzxUDJJ3fo4uyEefMBEdpjbEarugCYGi1kpUQFodjeYrltRmFbrpW6Vk0XPWpvq+9tjCVYew=="
       }
     },
     "@tylerho/pi-memory": {
