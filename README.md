@@ -20,7 +20,7 @@ Extensions for the pi coding agent, published as individual npm packages under t
 | [`@tylerho/pi-guard`](packages/pi-guard) | no record | Prompts for human confirmation before risky git writes, PR publishing, and recursive rm in the bash tool. |
 | [`@tylerho/pi-long-cache`](packages/pi-long-cache) | no record | Forces long prompt-cache retention in-process so providers without an explicit opt-in still get caching. |
 | [`@tylerho/pi-memory`](packages/pi-memory) | no record | Claude Code-style persistent file-based memory, with per-turn recall and idle-triggered consolidation dreams. |
-| [`@tylerho/pi-prompt-stash`](packages/pi-prompt-stash) | no record | Saves and restores the editor's draft text in a single slot via ctrl+s, Claude Code style. |
+| [`@tylerho/pi-prompt-stash`](packages/pi-prompt-stash) | published 0.2.0 | Saves and restores the editor's draft text in a single slot via ctrl+s, Claude Code style. |
 | [`@tylerho/pi-reminders`](packages/pi-reminders) | no record | Injects dynamic system-reminder messages before each LLM call from a shared generator registry. |
 | [`@tylerho/pi-skill-stack`](packages/pi-skill-stack) | wip (source only) | Expands every skill named in a prompt, so several skills stack in one message before the model reads it. |
 | [`@tylerho/pi-skills-banner-split`](packages/pi-skills-banner-split) ⚠️ | wip (source only) | Splits the startup banner's Skills section into model-invokable and user-invoked groups. |
