@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-worktree",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Lets the agent create, enter, and exit isolated git worktrees for parallel work in one repo.",
   "license": "MIT",
