@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-clear",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Registers `/clear` as an alias for pi's built-in `/new`, the command Claude Code users already type.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-clear"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-clear",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/clear"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}
