@@ -78,6 +78,12 @@
       "builtFrom": {
         "sourceHash": "sha256:302cf2e6f4bb52e1e8d823165e7dcf8d1a8d0c4d55e77946e1c23cf97d9241d6",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.2.1",
+        "sourceHash": "sha256:302cf2e6f4bb52e1e8d823165e7dcf8d1a8d0c4d55e77946e1c23cf97d9241d6",
+        "at": "2026-09-21T03:37:11.161Z",
+        "integrity": "sha512-Hw/QhQYrAy4a+WSUGW5laOlwc/TXTAWomYGRHjmDjpG5OY3cIHtG/Lml7OaNw5W1p0wO3P1EZxMO9EY+v6CL/w=="
       }
     },
     "@tylerho/pi-web-fetch": {
