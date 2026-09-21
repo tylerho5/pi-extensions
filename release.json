@@ -218,6 +218,12 @@
       "builtFrom": {
         "sourceHash": "sha256:ac71820b743a34b087837bfd8d43cbba63ab4ab8706285c337e830845315c369",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.2.1",
+        "sourceHash": "sha256:ac71820b743a34b087837bfd8d43cbba63ab4ab8706285c337e830845315c369",
+        "at": "2026-09-21T03:37:28.820Z",
+        "integrity": "sha512-DZzR6zfSCmjsuJBqZ8DzPR8tNrXGxVX1J3xv9WjrqxV1P6CcRUm2Rir87i0GSYm0d/yxMzHXZvgNU4BvSnq2fw=="
       }
     },
     "@tylerho/pi-collapsed-previews": {
