@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-long-cache",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Forces long prompt-cache retention in-process so providers without an explicit opt-in still get caching.",
   "license": "MIT",
