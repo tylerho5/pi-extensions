@@ -16,7 +16,7 @@ Extensions for the pi coding agent, published as individual npm packages under t
 | [`@tylerho/pi-copy-all`](packages/pi-copy-all) | no record | Copies the current thread's user and assistant messages to the clipboard as plain text. |
 | [`@tylerho/pi-expanded-footer`](packages/pi-expanded-footer) | no record | Replaces the default footer with a Claude Code-style layout: model, context usage, cost, branch, worktree. |
 | [`@tylerho/pi-file-search`](packages/pi-file-search) | published 0.1.1 | Adds native fd and rg tools for fast, gitignore-aware file search with automatic binary resolution. |
-| [`@tylerho/pi-git-info`](packages/pi-git-info) | no record | On-demand /lg diff browser and /pr lookup for the current branch's local changes and open pull request. |
+| [`@tylerho/pi-git-info`](packages/pi-git-info) | published 0.1.1 | On-demand /lg diff browser and /pr lookup for the current branch's local changes and open pull request. |
 | [`@tylerho/pi-guard`](packages/pi-guard) | published 0.1.1 | Prompts for human confirmation before risky git writes, PR publishing, and recursive rm in the bash tool. |
 | [`@tylerho/pi-long-cache`](packages/pi-long-cache) | no record | Forces long prompt-cache retention in-process so providers without an explicit opt-in still get caching. |
 | [`@tylerho/pi-memory`](packages/pi-memory) | published 0.2.1 | Claude Code-style persistent file-based memory, with per-turn recall and idle-triggered consolidation dreams. |

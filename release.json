@@ -134,6 +134,12 @@
       "builtFrom": {
         "sourceHash": "sha256:a6c4d833e21a7248f540834f683d7c0e825b5346df2a936dddacd9ead23e26b8",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.1.1",
+        "sourceHash": "sha256:a6c4d833e21a7248f540834f683d7c0e825b5346df2a936dddacd9ead23e26b8",
+        "at": "2026-09-21T03:37:17.762Z",
+        "integrity": "sha512-NLyIZ9QFhIoVkBos4eCTh6Etr/gZSKo2pud6ccpATJgCGFoD1KOzWhk7sz695BU4cxlivVADr7iVEVacnq2E5w=="
       }
     },
     "@tylerho/pi-background-terminals": {
