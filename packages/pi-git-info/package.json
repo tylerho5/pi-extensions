@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-git-info",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "On-demand /lg diff browser and /pr lookup for the current branch's local changes and open pull request.",
   "license": "MIT",
