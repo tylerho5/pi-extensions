@@ -162,6 +162,12 @@
       "builtFrom": {
         "sourceHash": "sha256:aa37a172ec331d2f9874578e1288a8ae5abf9945b25b306f04dde165cd790fb6",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.2.1",
+        "sourceHash": "sha256:aa37a172ec331d2f9874578e1288a8ae5abf9945b25b306f04dde165cd790fb6",
+        "at": "2026-09-21T03:37:22.447Z",
+        "integrity": "sha512-I7uvTIKhOgBriDHgLD1hPDiibWqyhjiMhpbF+oUhzA9JqIujApc/yGMflSCLQ9hZvg0crNu81kZZXJf8cXp5eQ=="
       }
     },
     "@tylerho/pi-prompt-stash": {
