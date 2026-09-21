@@ -120,6 +120,12 @@
       "builtFrom": {
         "sourceHash": "sha256:482f91acd3069ed8cc77d79c0c788a78d61523094641e1892dc3b3da15548b9a",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.1.1",
+        "sourceHash": "sha256:482f91acd3069ed8cc77d79c0c788a78d61523094641e1892dc3b3da15548b9a",
+        "at": "2026-09-21T03:37:15.415Z",
+        "integrity": "sha512-Vc2HFcWBfDY9i6ZN/wbv1e9DeO7Fy06UPhtbaBBFpA1RlDOAee8Zqvp1g6bsUct8g1UvYE3WgwpVpEoOJOXKmw=="
       }
     },
     "@tylerho/pi-git-info": {
