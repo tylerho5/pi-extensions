@@ -103,7 +103,7 @@ export const SUBAGENT_SEND_TOOL_DESCRIPTION =
 export const SUBAGENT_SEND_PARAMETER_DESCRIPTIONS = {
   id: "Subagent id to steer or resume",
   message:
-    "Message to deliver. While the agent runs this is a course correction to the active run; when the agent is settled it starts another turn.",
+    "Message to deliver. While the agent runs this is a course correction to the active run; when the agent is settled it starts another turn. The user sees the first line as a one-line preview in the transcript, so make it a self-contained sentence saying what the message is about.",
 };
 
 /** Describes non-blocking result collection: settled runs return their report, running runs return status and guidance. */

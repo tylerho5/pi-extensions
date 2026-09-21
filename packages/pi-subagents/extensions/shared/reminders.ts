@@ -2,11 +2,10 @@
  * System-reminder registry — shared leaf module.
  *
  * Extensions register reminder generators here; the reminders extension
- * (extensions/reminders/) runs them before every LLM call and injects the
+ * (extensions/reminders/) runs them before every prompt and injects the
  * resulting text as a `<system-reminder>` user message (Claude Code's
- * attachment-pipeline semantics: per-request, delta-based, cache-preserving —
- * the reminder is appended after the cached prefix, never part of the system
- * prompt).
+ * attachment semantics: delta-based, and persisted so later requests re-send
+ * it — never part of the system prompt).
  *
  * This module is intentionally import-free so any extension or package can
  * use it without pulling in pi's extension API.
@@ -22,7 +21,7 @@ export interface ReminderGenerator {
    * ignore it and keep returning null.
    */
   compute(force: boolean): string | null;
-  /** Re-run compute(force=true) every N LLM calls, even when it returned null. */
+  /** Re-run compute(force=true) every N prompts, even when it returned null. */
   interval?: number;
   /** Called on session start so per-conversation state (announced names) resets. */
   reset?(): void;

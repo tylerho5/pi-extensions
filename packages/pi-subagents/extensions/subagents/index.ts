@@ -80,6 +80,7 @@ import {
 } from "./src/ui/model-picker.ts";
 import {
   BACKEND_NAMES,
+  formatElapsedBetween,
   latestText,
   REASONING_EFFORTS,
   runRefOf,
@@ -108,15 +109,42 @@ import {
   SUBAGENT_SPAWN_PROMPT_SNIPPET,
   SUBAGENT_SPAWN_TOOL_DESCRIPTION,
 } from "./src/prompt.ts";
-import { createDeferredResultDelivery } from "./src/result-delivery.ts";
+import {
+  createDeferredResultDelivery,
+  runRefKey,
+} from "./src/result-delivery.ts";
 import { buildHandback } from "./src/handback.ts";
 import {
   createSubagentRuntime,
   runTool,
   type SubagentRuntime,
 } from "./src/runtime.ts";
+import {
+  capChars,
+  formatContextUtilization,
+  formatCost,
+  truncationNotice,
+} from "./src/format.ts";
+import {
+  fastSummaryTarget,
+  makeSummarizeDeps,
+  shouldSummarize,
+  summarizeReport,
+  type SummarizeResult,
+} from "./src/summarize.ts";
+import { loadSummaryConfig } from "./src/summary-config.ts";
 import { openBtwPanel } from "./src/ui/btw-panel.ts";
-import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
+import {
+  openSubagentPicker,
+  openSubagentTakeover,
+  statusGlyph,
+  statusWord,
+} from "./src/ui/takeover.ts";
+import {
+  rowComponent,
+  sendCallRowText,
+  sendRowText,
+} from "./src/ui/send-row.ts";
 import {
   createTaskRail,
   TaskRailController,
@@ -147,6 +175,26 @@ interface SubagentResultDetails {
   readonly errorText?: string;
   readonly fullOutput: string;
   readonly sessionFilePath?: string;
+  readonly createdAt?: number;
+  readonly settledAt?: number;
+  readonly runStartedAt?: number;
+  readonly costUsd?: number;
+  readonly tokens?: number;
+  readonly contextWindow?: number;
+  readonly summary?: string;
+  readonly summaryCostUsd?: number;
+  readonly summaryTokens?: number;
+}
+
+function elapsedOf(details: {
+  runStartedAt?: number;
+  createdAt?: number;
+  settledAt?: number;
+}): string | undefined {
+  const start = details.runStartedAt ?? details.createdAt;
+  return start === undefined
+    ? undefined
+    : formatElapsedBetween(start, details.settledAt);
 }
 
 function truncatedOutput(
@@ -254,6 +302,83 @@ export default function (pi: ExtensionAPI) {
   const taskRail = new TaskRailController();
   const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>();
 
+  /**
+   * One digest per run, shared between the automatic delivery and
+   * subagent_check so a checked run never pays for a second call.
+   */
+  const summaryCache = new Map<string, Promise<SummarizeResult | undefined>>();
+  let summaryConfigCache: ReturnType<typeof loadSummaryConfig> | undefined;
+  const summaryConfig = () => (summaryConfigCache ??= loadSummaryConfig());
+  const rawCharCap = () => summaryConfig().rawCharCap;
+
+  // At most two digest calls in flight; the rest queue in order.
+  let summarySlots = 0;
+  const summaryQueue: Array<() => void> = [];
+  const acquireSummarySlot = () => {
+    if (summarySlots < 2) {
+      summarySlots += 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => summaryQueue.push(resolve));
+  };
+  const releaseSummarySlot = () => {
+    const next = summaryQueue.shift();
+    if (next) next();
+    else summarySlots = Math.max(0, summarySlots - 1);
+  };
+
+  const computeSummary = async (
+    snap: SubagentSnapshot,
+  ): Promise<SummarizeResult | undefined> => {
+    const config = summaryConfig();
+    if (
+      !shouldSummarize({
+        enabled: config.enabled,
+        status: snap.status,
+        textLength: snap.finalText.length,
+        skipUnderChars: config.skipUnderChars,
+      })
+    ) {
+      return undefined;
+    }
+    const context = sessionContext;
+    if (!context) return undefined;
+    let target: ReturnType<typeof fastSummaryTarget>;
+    try {
+      target = fastSummaryTarget();
+    } catch {
+      return undefined;
+    }
+    await acquireSummarySlot();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+    try {
+      return await summarizeReport({
+        deps: makeSummarizeDeps(context.modelRegistry),
+        target,
+        report: snap.finalText,
+        inputCharCap: config.inputCharCap,
+        signal: controller.signal,
+      });
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+      releaseSummarySlot();
+    }
+  };
+
+  const ensureSummary = (
+    snap: SubagentSnapshot,
+  ): Promise<SummarizeResult | undefined> => {
+    const key = runRefKey(runRefOf(snap));
+    const existing = summaryCache.get(key);
+    if (existing) return existing;
+    const pending = computeSummary(snap);
+    summaryCache.set(key, pending);
+    return pending;
+  };
+
   const getRuntime = () => (runtime ??= createSubagentRuntime());
 
   /** Resolve the manager service once per runtime and wire the extension hooks. */
@@ -269,7 +394,8 @@ export default function (pi: ExtensionAPI) {
     return managerPromise;
   };
 
-  const deliverResult = (snap: SubagentSnapshot) => {
+  const deliverResult = async (snap: SubagentSnapshot) => {
+    const summary = sessionContext ? await ensureSummary(snap) : undefined;
     const handback = buildHandback({
       snapshot: snap,
       output: snap.finalText,
@@ -286,14 +412,31 @@ export default function (pi: ExtensionAPI) {
           errorText: snap.errorText,
           fullOutput: handback.fullOutput,
           sessionFilePath: snap.meta.sessionFilePath,
+          createdAt: snap.createdAt,
+          settledAt: snap.settledAt,
+          runStartedAt: snap.runStartedAt,
+          costUsd: snap.usage.costUsd,
+          tokens: snap.usage.tokens,
+          contextWindow: snap.usage.contextWindow,
+          summary: summary?.summary,
+          summaryCostUsd: summary?.costUsd,
+          summaryTokens: summary?.tokens,
         } satisfies SubagentResultDetails,
       },
       { deliverAs: "followUp", triggerTurn: true },
     );
   };
 
-  const flushResults = () => {
-    for (const snap of resultDelivery.drain()) deliverResult(snap);
+  const flushResults = async () => {
+    for (const snap of resultDelivery.drain()) {
+      // A summary can outlive the session that requested it; a failed send
+      // during shutdown must not strand the remaining results.
+      try {
+        await deliverResult(snap);
+      } catch {
+        // The parent session may be closing; settlement stays final.
+      }
+    }
   };
 
   const deliverBtwResult = (snap: SubagentSnapshot) => {
@@ -335,7 +478,7 @@ export default function (pi: ExtensionAPI) {
     // Defer a copy: the live snapshot keeps mutating if the subagent is
     // restarted before the deferred result flushes.
     resultDelivery.defer({ ...snap, meta: { ...snap.meta } });
-    if (sessionContext?.isIdle()) flushResults();
+    if (sessionContext?.isIdle()) void flushResults();
   };
 
   const refreshTaskRail = () => {
@@ -453,7 +596,9 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  pi.on("agent_settled", flushResults);
+  pi.on("agent_settled", () => {
+    void flushResults();
+  });
 
   pi.on("session_shutdown", async () => {
     sessionContext = undefined;
@@ -465,6 +610,8 @@ export default function (pi: ExtensionAPI) {
     rawInputUnsubscribe = undefined;
     taskRail.reset();
     resultDelivery.clear();
+    summaryCache.clear();
+    summaryConfigCache = undefined;
     ui = undefined;
     const closing = runtime;
     runtime = undefined;
@@ -731,9 +878,51 @@ export default function (pi: ExtensionAPI) {
             id: entry.id,
             description: entry.description,
             status: entry.status,
+            cancelled: entry.cancelled,
           })),
         },
       };
+    },
+    renderResult(result, { expanded }, theme, context) {
+      const details = result.details as
+        | {
+            results?: Array<{
+              id: string;
+              description: string;
+              status: string;
+              cancelled: boolean;
+            }>;
+          }
+        | undefined;
+      if (context.isError || !details?.results) {
+        const msg =
+          result.content[0]?.type === "text"
+            ? result.content[0].text
+            : "cancel failed";
+        return new Text(theme.fg("error", msg), 0, 0);
+      }
+      const lines = details.results.map((entry) =>
+        entry.cancelled
+          ? `${theme.fg("warning", "x ")}${theme.fg("accent", entry.id)}${theme.fg(
+              "muted",
+              ` "${entry.description}"`,
+            )}`
+          : `${theme.fg("dim", "· ")}${theme.fg("accent", entry.id)}${theme.fg(
+              "muted",
+              ` "${entry.description}" was already ${entry.status}`,
+            )}`,
+      );
+      let text = lines.join("\n");
+      if (!expanded) {
+        text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
+        return new Text(text, 0, 0);
+      }
+      const contentText =
+        result.content[0]?.type === "text" ? result.content[0].text : "";
+      const { text: capped, truncated } = capChars(contentText, rawCharCap());
+      text += `\n${theme.fg("toolOutput", capped)}`;
+      if (truncated) text += `\n${theme.fg("dim", truncationNotice())}`;
+      return new Text(text, 0, 0);
     },
   });
 
@@ -782,6 +971,56 @@ export default function (pi: ExtensionAPI) {
         },
       };
     },
+    renderCall(args, theme) {
+      return rowComponent((width) =>
+        sendCallRowText({
+          id: args.id,
+          message: args.message ?? "",
+          theme,
+          width,
+        }),
+      );
+    },
+    renderResult(result, { expanded }, theme, context) {
+      if (context.isError || !result.details) {
+        const msg =
+          result.content[0]?.type === "text"
+            ? result.content[0].text
+            : "send failed";
+        return new Text(theme.fg("error", msg), 0, 0);
+      }
+      const d = result.details;
+      const message =
+        typeof context.args?.message === "string" ? context.args.message : "";
+      if (!expanded) {
+        return rowComponent((width) =>
+          sendRowText({
+            id: d.id,
+            restarted: d.restarted,
+            runSequence: d.runSequence,
+            message,
+            theme,
+            width,
+          }),
+        );
+      }
+      const header =
+        theme.fg("success", "⏵ ") +
+        theme.fg("accent", d.id) +
+        theme.fg(
+          "muted",
+          ` · ${d.restarted ? "resumed" : "steered"} (run ${d.runSequence})`,
+        );
+      const body = [
+        d.restarted
+          ? theme.fg("dim", "The result arrives the same way as a spawn.")
+          : "",
+        theme.fg("muted", message),
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return new Text(`${header}\n${body}`, 0, 0);
+    },
   });
 
   interface CheckDetails {
@@ -790,6 +1029,17 @@ export default function (pi: ExtensionAPI) {
     status: SubagentSnapshot["status"];
     turns: number;
     tier: DelegationTier | "explicit" | undefined;
+    runSequence: number;
+    createdAt?: number;
+    settledAt?: number;
+    runStartedAt?: number;
+    costUsd?: number;
+    tokens?: number;
+    contextWindow?: number;
+    sessionFilePath?: string;
+    summary?: string;
+    summaryCostUsd?: number;
+    summaryTokens?: number;
   }
 
   pi.registerTool({
@@ -817,6 +1067,9 @@ export default function (pi: ExtensionAPI) {
         // after the follow-up already flushed; consuming is idempotent and
         // prevents a second automatic delivery for a run checked on demand.
         consumeReturnedRuns(resultDelivery, manager.view, [snap.id]);
+        // Share the automatic delivery's digest; a later check re-renders the
+        // same one from the cache instead of paying for a second call.
+        const summary = sessionContext ? await ensureSummary(snap) : undefined;
         const handback = buildHandback({
           snapshot: snap,
           output: snap.finalText,
@@ -829,6 +1082,17 @@ export default function (pi: ExtensionAPI) {
             status: snap.status,
             turns: snap.turns,
             tier: snap.meta.tier,
+            runSequence: snap.runSequence,
+            createdAt: snap.createdAt,
+            settledAt: snap.settledAt,
+            runStartedAt: snap.runStartedAt,
+            costUsd: snap.usage.costUsd,
+            tokens: snap.usage.tokens,
+            contextWindow: snap.usage.contextWindow,
+            sessionFilePath: snap.meta.sessionFilePath,
+            summary: summary?.summary,
+            summaryCostUsd: summary?.costUsd,
+            summaryTokens: summary?.tokens,
           },
         };
       }
@@ -854,8 +1118,73 @@ export default function (pi: ExtensionAPI) {
           status: snap.status,
           turns: snap.turns,
           tier: snap.meta.tier,
+          runSequence: snap.runSequence,
+          createdAt: snap.createdAt,
+          runStartedAt: snap.runStartedAt,
+          costUsd: snap.usage.costUsd,
+          tokens: snap.usage.tokens,
+          contextWindow: snap.usage.contextWindow,
+          sessionFilePath: snap.meta.sessionFilePath,
         },
       };
+    },
+    renderResult(result, { expanded }, theme, context) {
+      if (context.isError || !result.details) {
+        const msg =
+          result.content[0]?.type === "text"
+            ? result.content[0].text
+            : "check failed";
+        return new Text(theme.fg("error", msg), 0, 0);
+      }
+      const d = result.details;
+      const parts = [theme.fg("accent", d.id)];
+      if (d.description) parts.push(theme.fg("muted", d.description));
+      parts.push(statusWord({ status: d.status }, theme));
+      const elapsed = elapsedOf(d);
+      if (elapsed) parts.push(theme.fg("muted", elapsed));
+      const cost = formatCost(d.costUsd);
+      if (cost) parts.push(theme.fg("muted", cost));
+      const utilization = formatContextUtilization({
+        tokens: d.tokens,
+        contextWindow: d.contextWindow,
+      });
+      if (utilization) parts.push(theme.fg("muted", utilization));
+      let text =
+        statusGlyph({ status: d.status }, theme) +
+        " " +
+        parts.join(theme.fg("dim", " · "));
+
+      if (!expanded) {
+        if (d.summary) {
+          const summaryMeta = [
+            formatCost(d.summaryCostUsd)
+              ? `summary ${formatCost(d.summaryCostUsd)}`
+              : "",
+            d.summaryTokens !== undefined ? `${d.summaryTokens} tok` : "",
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          text +=
+            "\n" +
+            theme.fg("muted", d.summary) +
+            (summaryMeta ? theme.fg("dim", ` · ${summaryMeta}`) : "");
+        }
+        text += ` (${keyHint("app.tools.expand", "to expand")})`;
+        return new Text(text, 0, 0);
+      }
+
+      const contentText =
+        result.content[0]?.type === "text" ? result.content[0].text : "";
+      if (d.status === "running") {
+        // Running: the returned content is the status plus latest output.
+        return new Text(`${text}\n${contentText}`, 0, 0);
+      }
+      const { text: capped, truncated } = capChars(contentText, rawCharCap());
+      let body = `${text}\n${capped}`;
+      if (truncated) {
+        body += `\n${theme.fg("dim", truncationNotice(d.sessionFilePath))}`;
+      }
+      return new Text(body, 0, 0);
     },
   });
 
@@ -899,13 +1228,25 @@ export default function (pi: ExtensionAPI) {
         : failed
           ? theme.fg("error", "x")
           : theme.fg("success", "■");
+      const statusText = cancelled
+        ? "cancelled"
+        : failed
+          ? "failed"
+          : "finished";
+      const headerParts = [
+        theme.fg(
+          "muted",
+          ` · ${details.description ?? details.title ?? ""} · ${statusText}`,
+        ),
+      ];
+      const elapsed = elapsedOf(details);
+      if (elapsed) headerParts.push(theme.fg("dim", ` · ${elapsed}`));
+      const cost = formatCost(details.costUsd);
+      if (cost) headerParts.push(theme.fg("dim", ` · ${cost}`));
       const header =
         `${icon} ` +
         theme.fg("accent", theme.bold(`subagent ${details.id ?? "?"}`)) +
-        theme.fg(
-          "muted",
-          ` · ${details.description ?? details.title ?? ""} · ${cancelled ? "cancelled" : failed ? "failed" : "finished"}`,
-        );
+        headerParts.join("");
 
       const content =
         typeof message.content === "string" ? message.content : "";
@@ -920,35 +1261,42 @@ export default function (pi: ExtensionAPI) {
         .trim();
       const body = (details.fullOutput ?? contentBody).trim();
 
-      if (expanded) {
-        // The full output lives in details so it never enters the model
-        // context; entries persisted before that split fall back to the body.
-        const full = [
-          details.errorText ? `Error: ${details.errorText}` : "",
-          body,
-        ]
-          .filter(Boolean)
-          .join("\n\n");
-        const md = new Markdown(`${full}`, 0, 0, getMarkdownTheme());
-        const container = new Text(header, 0, 0);
-        return {
-          render: (width: number) => [
-            ...container.render(width),
-            ...md.render(width),
-          ],
-          invalidate: () => {
-            container.invalidate();
-            md.invalidate();
-          },
-        };
+      if (!expanded) {
+        // The collapsed row is the header plus the digest; the raw report is
+        // only shown on expand, so long output never floods the transcript.
+        let text = header;
+        if (details.summary) {
+          const summaryMeta = [
+            formatCost(details.summaryCostUsd)
+              ? `summary ${formatCost(details.summaryCostUsd)}`
+              : "",
+            details.summaryTokens !== undefined
+              ? `${details.summaryTokens} tok`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          text +=
+            "\n" +
+            theme.fg("muted", details.summary) +
+            (summaryMeta ? theme.fg("dim", ` · ${summaryMeta}`) : "");
+        }
+        return new Text(text, 0, 0);
       }
 
-      const previewLines = body.split("\n").slice(0, 8);
-      let text = header;
-      for (const line of previewLines)
-        text += `\n${theme.fg("toolOutput", line)}`;
-      if (body.split("\n").length > 8)
-        text += `\n${theme.fg("dim", "... (ctrl+o to expand)")}`;
+      // Expanded: the raw report lives in details so it never enters the model
+      // context; entries persisted before that split fall back to the body.
+      const full = [
+        details.errorText ? `Error: ${details.errorText}` : "",
+        body,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const { text: capped, truncated } = capChars(full, rawCharCap());
+      let text = `${header}\n${capped}`;
+      if (truncated) {
+        text += `\n${theme.fg("dim", truncationNotice(details.sessionFilePath))}`;
+      }
       return new Text(text, 0, 0);
     },
   );

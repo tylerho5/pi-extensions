@@ -14,7 +14,7 @@ carried over. No real Claude/Codex process integration yet; the pi backend may a
 stubbed initially so the manager/UI/tool loop can be exercised end to end with zero
 external dependencies.
 
-**Location:** `/Users/davis/.pi/agent/extensions/subagents/` — fully self-contained
+**Location:** `/Users/tylerho/.pi/agent/extensions/subagents/` — fully self-contained
 (no imports from `../shared` or `../subagents`; the handful of shared helpers v1 uses are
 copied in).
 
@@ -22,7 +22,7 @@ copied in).
 
 ## 1. V1 inventory (what must be preserved)
 
-Source: `/Users/davis/.pi/agent/extensions/subagents/` (`index.ts`, `manager.ts`,
+Source: `/Users/tylerho/.pi/agent/extensions/subagents/` (`index.ts`, `manager.ts`,
 `prompt.ts`, `result-delivery.ts`, `takeover.ts`) plus `../shared/` helpers.
 
 ### 1.1 Tools exposed to the parent LLM
@@ -469,7 +469,7 @@ views are exercised end to end:
 ## 4. File/module layout
 
 ```
-/Users/davis/.pi/agent/extensions/subagents/
+/Users/tylerho/.pi/agent/extensions/subagents/
 ├── package.json               # name, "effect": "^4.0.0-beta.x"; pi extension entry via pi.extensions
 ├── package-lock.json / node_modules/   (after npm install)
 ├── docs/

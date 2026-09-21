@@ -106,6 +106,7 @@ interface MutableSnapshot {
   status: SubagentStatus;
   runSequence: number;
   createdAt: number;
+  runStartedAt: number;
   settledAt?: number;
   errorText?: string;
   meta: SubagentMeta;
@@ -392,6 +393,7 @@ const makeManager = Effect.gen(function* () {
       case "RunStarted":
         entry.restarting = false;
         s.status = "running";
+        s.runStartedAt = Date.now();
         s.settledAt = undefined;
         s.errorText = undefined;
         break;
@@ -589,6 +591,7 @@ const makeManager = Effect.gen(function* () {
             status: "running",
             runSequence: 1,
             createdAt: Date.now(),
+            runStartedAt: Date.now(),
             meta,
             usage: { contextWindow: meta.contextWindow },
             transcript: [],

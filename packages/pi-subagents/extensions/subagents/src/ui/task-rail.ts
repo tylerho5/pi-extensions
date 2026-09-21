@@ -1,6 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatElapsed, type SubagentSnapshot } from "../domain.ts";
+import { formatContextUtilization, formatCost } from "../format.ts";
 import type { SubagentReadModel } from "../manager.ts";
 
 /** Window for the collapsed down double-tap that opens the rail. */
@@ -114,6 +115,12 @@ export class TaskRailController {
 /** Rows the expanded rail can occupy; longer lists scroll with the selection. */
 const MAX_RAIL_ROWS = 8;
 
+/** Running rows the auto (unexpanded) rail shows before a `… N more` line. */
+const MAX_AUTO_ROWS = 4;
+
+/** Braille spinner frames; the rail's ticker advances one per second. */
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⢼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 function active(snap: SubagentSnapshot) {
   return snap.status === "running";
 }
@@ -149,6 +156,55 @@ function stateText(snap: SubagentSnapshot, theme: Theme) {
   }
 }
 
+/**
+ * One auto row: spinner, description, then cost, elapsed, and ctx% as dim
+ * segments. Under width pressure the segments drop in the order cost, ctx%,
+ * elapsed; after that the description truncates but keeps an 8-column floor.
+ */
+function autoRow(
+  snap: SubagentSnapshot,
+  theme: Theme,
+  width: number,
+  frame: string,
+) {
+  const segments = [
+    { key: "cost", text: formatCost(snap.usage.costUsd) },
+    { key: "ctx", text: formatContextUtilization(snap.usage) },
+    { key: "elapsed", text: formatElapsed(snap) },
+  ].filter((segment) => segment.text.length > 0);
+  const prefix = theme.fg("warning", frame) + " ";
+  let kept = segments;
+  const compose = (parts: typeof segments) =>
+    prefix +
+    theme.fg("text", snap.description) +
+    (parts.length
+      ? theme.fg("dim", " · ") +
+        parts
+          .map((segment) => theme.fg("dim", segment.text))
+          .join(theme.fg("dim", " · "))
+      : "");
+  for (const key of ["cost", "ctx", "elapsed"]) {
+    const row = compose(kept);
+    if (visibleWidth(row) <= width) return row;
+    kept = kept.filter((segment) => segment.key !== key);
+  }
+  const suffix = kept.length
+    ? theme.fg("dim", " · ") +
+      kept
+        .map((segment) => theme.fg("dim", segment.text))
+        .join(theme.fg("dim", " · "))
+    : "";
+  const available = Math.max(
+    8,
+    width - visibleWidth(prefix) - visibleWidth(suffix),
+  );
+  const description = truncateToWidth(
+    theme.fg("text", snap.description),
+    available,
+  );
+  return truncateToWidth(prefix + description + suffix, width);
+}
+
 export function createTaskRail(
   view: SubagentReadModel,
   controller: TaskRailController,
@@ -156,22 +212,46 @@ export function createTaskRail(
   requestRender: () => void,
 ) {
   controller.attach(requestRender);
-  const unsubscribe = view.subscribe(requestRender);
+  let spinnerFrame = 0;
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  const anyRunning = () => summary(view).running > 0;
+  // The ticker exists only while something runs: it animates the auto rows'
+  // spinner, so an idle rail pays nothing.
+  const syncTicker = () => {
+    if (anyRunning()) {
+      ticker ??= setInterval(() => {
+        spinnerFrame += 1;
+        requestRender();
+      }, 1000);
+      return;
+    }
+    if (ticker !== undefined) {
+      clearInterval(ticker);
+      ticker = undefined;
+    }
+  };
+  syncTicker();
+  const unsubscribe = view.subscribe(() => {
+    syncTicker();
+    requestRender();
+  });
 
   return {
     dispose() {
+      if (ticker !== undefined) clearInterval(ticker);
+      ticker = undefined;
       unsubscribe();
     },
     invalidate() {},
     render(width: number) {
       const { running, finished } = summary(view);
-      if (running === 0 && finished === 0) return [];
+      const selectable = controller.expanded;
+      // Collapsed and idle: the rail is fully hidden. The down double-tap
+      // still expands for browsing finished agents.
+      if (!selectable && running === 0) return [];
 
-      const visible = visibleRailSubagents(view, controller);
-      const start = controller.windowOffset(visible, MAX_RAIL_ROWS);
-      const windowed = visible.slice(start, start + MAX_RAIL_ROWS);
       const header = controller.showFinished ? "Subagents · all" : "Subagents";
-      const hint = controller.expanded ? "enter view" : "↓↓ focus";
+      const hint = selectable ? "enter view" : "↓↓ select";
       // Segments joined with dim separators (rather than one muted wrap) so
       // the colored count squares don't reset the surrounding styling.
       const segments = [
@@ -188,8 +268,23 @@ export function createTaskRail(
       const lines = [
         truncateToWidth(segments.join(theme.fg("dim", " · ")), width),
       ];
-      if (!controller.expanded) return lines;
 
+      if (!selectable) {
+        // Auto state: running model-origin agents only, no selection state.
+        const rows = view
+          .list()
+          .filter((snap) => snap.origin === "model" && active(snap))
+          .slice(0, MAX_AUTO_ROWS);
+        const frame = SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!;
+        for (const snap of rows) lines.push(autoRow(snap, theme, width, frame));
+        const more = running - rows.length;
+        if (more > 0) lines.push(theme.fg("dim", `  … ${more} more`));
+        return lines;
+      }
+
+      const visible = visibleRailSubagents(view, controller);
+      const start = controller.windowOffset(visible, MAX_RAIL_ROWS);
+      const windowed = visible.slice(start, start + MAX_RAIL_ROWS);
       for (const snap of windowed) {
         const selected = snap.id === controller.selectedId;
         const marker = selected ? theme.fg("accent", "❯") : " ";

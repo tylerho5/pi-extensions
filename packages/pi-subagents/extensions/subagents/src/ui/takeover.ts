@@ -28,7 +28,10 @@ export function configuredKeys(
   return keybindings.getKeys(binding).join("/") || "unbound";
 }
 
-export function statusGlyph(snap: SubagentSnapshot, theme: Theme): string {
+export function statusGlyph(
+  snap: Pick<SubagentSnapshot, "status">,
+  theme: Theme,
+): string {
   switch (snap.status) {
     case "running":
       return theme.fg("warning", "■");
@@ -41,7 +44,10 @@ export function statusGlyph(snap: SubagentSnapshot, theme: Theme): string {
   }
 }
 
-export function statusWord(snap: SubagentSnapshot, theme: Theme): string {
+export function statusWord(
+  snap: Pick<SubagentSnapshot, "status">,
+  theme: Theme,
+): string {
   switch (snap.status) {
     case "running":
       return theme.fg("warning", "running");

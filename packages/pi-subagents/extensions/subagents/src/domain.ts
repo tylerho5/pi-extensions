@@ -283,6 +283,12 @@ export interface SubagentSnapshot {
   /** 1-based run counter; a settled agent resumed via send starts a new run. */
   readonly runSequence: number;
   readonly createdAt: number;
+  /**
+   * When the current run started. Equal to createdAt for the first run and
+   * reset on each resume, so elapsed time measures the live run rather than
+   * the agent's total age. Optional for snapshots written before it existed.
+   */
+  readonly runStartedAt?: number;
   readonly settledAt?: number;
   readonly errorText?: string;
   readonly meta: SubagentMeta;
@@ -318,14 +324,26 @@ export function latestText(snap: SubagentSnapshot) {
   return snap.finalText;
 }
 
-export function formatElapsed(snap: SubagentSnapshot) {
-  const end = snap.settledAt ?? Date.now();
-  const totalSeconds = Math.max(0, Math.round((end - snap.createdAt) / 1000));
+export function formatElapsedBetween(startedAt: number, endedAt?: number) {
+  const totalSeconds = Math.max(
+    0,
+    Math.round(((endedAt ?? Date.now()) - startedAt) / 1000),
+  );
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return minutes > 0
     ? `${minutes}m${seconds.toString().padStart(2, "0")}s`
     : `${seconds}s`;
+}
+
+/** Elapsed time for the current run, falling back to total age before then. */
+export function formatElapsed(
+  snap: Pick<SubagentSnapshot, "createdAt" | "settledAt" | "runStartedAt">,
+) {
+  return formatElapsedBetween(
+    snap.runStartedAt ?? snap.createdAt,
+    snap.settledAt,
+  );
 }
 
 // --- Errors -------------------------------------------------------------------
