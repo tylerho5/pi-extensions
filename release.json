@@ -50,6 +50,12 @@
       "builtFrom": {
         "sourceHash": "sha256:4cd1aff8b2ec9ef8b6654bb06f6b417ec5a1ba3a72cea913ee1aea72fa5ea504",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.2.1",
+        "sourceHash": "sha256:4cd1aff8b2ec9ef8b6654bb06f6b417ec5a1ba3a72cea913ee1aea72fa5ea504",
+        "at": "2026-09-21T03:37:06.482Z",
+        "integrity": "sha512-CbY0S/MHF7HgG8CQUS/u8UE4Zor5AT5Gn3ifStWSqui88ehZEOAr3oGutGvuB0Jq15jRdJhraetcT4SFYf4lnQ=="
       }
     },
     "@tylerho/pi-reminders": {
