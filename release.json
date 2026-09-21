@@ -64,6 +64,12 @@
       "builtFrom": {
         "sourceHash": "sha256:e2e3885bee27d03df3743078fa5051687f10442ef873ceaebfd1f17adb951b63",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.3.0",
+        "sourceHash": "sha256:e2e3885bee27d03df3743078fa5051687f10442ef873ceaebfd1f17adb951b63",
+        "at": "2026-09-21T03:37:08.888Z",
+        "integrity": "sha512-Xud8IAXkRtZgtI/8ndzV19naGGVmOSXpe7hyfLxC6b/VlFKyc68nhw0CnSXB2ZKe3Xfxq6i6zJSuJ5iF+85+DQ=="
       }
     },
     "@tylerho/pi-worktree": {
