@@ -1,17 +1,17 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-21T02:45:55.810Z",
+  "generatedAt": "2026-09-21T02:55:22.300Z",
   "packages": {
     "@tylerho/pi-subagents": {
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:cd4ca1b12628da372dea42b992da776ef5378b9f3b5bed6ee3a64f913189a44b",
-        "at": "2026-09-21T02:03:36.489Z"
+        "sourceHash": "sha256:cff6bfe1aed25877549aac1490b6d5021cf1c5b6c8501a159df371702e7741ff",
+        "at": "2026-09-21T02:55:22.300Z"
       }
     },
     "@tylerho/pi-memory": {
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:e9b63a5ba6d2bcefaad66ce00d0a9426f2383cca70483ea692420ad325bcb283",
@@ -33,7 +33,7 @@
       }
     },
     "@tylerho/pi-advisor": {
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:4cd1aff8b2ec9ef8b6654bb06f6b417ec5a1ba3a72cea913ee1aea72fa5ea504",
@@ -41,7 +41,7 @@
       }
     },
     "@tylerho/pi-reminders": {
-      "version": "0.2.0",
+      "version": "0.3.0",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:e2e3885bee27d03df3743078fa5051687f10442ef873ceaebfd1f17adb951b63",
@@ -49,7 +49,7 @@
       }
     },
     "@tylerho/pi-worktree": {
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:302cf2e6f4bb52e1e8d823165e7dcf8d1a8d0c4d55e77946e1c23cf97d9241d6",
@@ -71,7 +71,7 @@
       }
     },
     "@tylerho/pi-guard": {
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:7e721b2343bcb182310c37cb26f93fc0fc695ffb6eb872e6c01c752fc8becd71",
@@ -79,7 +79,7 @@
       }
     },
     "@tylerho/pi-file-search": {
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:482f91acd3069ed8cc77d79c0c788a78d61523094641e1892dc3b3da15548b9a",
@@ -87,7 +87,7 @@
       }
     },
     "@tylerho/pi-git-info": {
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:a6c4d833e21a7248f540834f683d7c0e825b5346df2a936dddacd9ead23e26b8",
@@ -95,11 +95,11 @@
       }
     },
     "@tylerho/pi-background-terminals": {
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:32b0e48d17b3f11ecd9de038638c9dfddbb82d817e4f7f912f759cd904faf214",
-        "at": "2026-09-21T02:03:36.489Z"
+        "sourceHash": "sha256:dbc95abdde736063b58a0616dfacde1d02760b84891cdee422ce6a09dd32b182",
+        "at": "2026-09-21T02:55:22.300Z"
       },
       "published": {
         "version": "0.2.0",
@@ -109,7 +109,7 @@
       }
     },
     "@tylerho/pi-ask-user-question": {
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:aa37a172ec331d2f9874578e1288a8ae5abf9945b25b306f04dde165cd790fb6",
@@ -131,7 +131,7 @@
       }
     },
     "@tylerho/pi-copy-all": {
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:9fa4e021f443acaa45ffa23778202a72daffaa74b73b3e77cfcd109ac3e8d8d8",
@@ -139,7 +139,7 @@
       }
     },
     "@tylerho/pi-long-cache": {
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:0fe1f3f460f45c5e2a6ba5d9bb3b7b2e0a1ad5b6816588037b1796833d24e1c4",
@@ -147,7 +147,7 @@
       }
     },
     "@tylerho/pi-expanded-footer": {
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:ac71820b743a34b087837bfd8d43cbba63ab4ab8706285c337e830845315c369",
@@ -187,7 +187,7 @@
       }
     },
     "@tylerho/pi-workflows": {
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "stable",
       "builtFrom": {
         "sourceHash": "sha256:0f6402d482a128a00ccbb958972217b9bc02131a530f3ba1f05c6100d4237893",
