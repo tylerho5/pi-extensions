@@ -1,0 +1,30 @@
+{
+  "name": "@tylerho/pi-skill-stack",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Expands every skill named in a prompt, so several skills stack in one message before the model reads it.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-skill-stack"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-skill-stack",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/skill-stack"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {}
+}
