@@ -3,7 +3,7 @@
  *
  * CC derives the target from a "+500k"-style directive on the user's turn. Pi
  * has no such directive, so the target comes from the tool's `budgetTokens`
- * parameter or the persisted `/workflow-budget` default. The semantics match:
+ * parameter or the persisted `/workflows-budget` default. The semantics match:
  * a HARD ceiling — once spent reaches total, further agent() calls throw.
  */
 

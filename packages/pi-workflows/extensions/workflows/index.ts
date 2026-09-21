@@ -45,6 +45,7 @@ import {
   saveDefaultBudget,
 } from "./budget.ts";
 import { sessionWorkflowRunIds, showWorkflowDashboard } from "./dashboard.ts";
+import { renderWorkflowCompletion } from "./completion.ts";
 import { createResumePlan, readJournal } from "./journal.ts";
 import {
   compactToolDetails,
@@ -80,6 +81,7 @@ import {
   WORKFLOW_TOOL_DESCRIPTION,
 } from "./prompt.ts";
 import { createWorkflowResources, runAgent } from "./runner.ts";
+import { createWorkflowRail } from "./rail.ts";
 import {
   describeSavedWorkflows,
   findSavedWorkflow,
@@ -219,10 +221,37 @@ export default function workflows(pi: ExtensionAPI) {
   let lastUi: ExtensionContext["ui"] | undefined;
   let completedRuns = 0;
   let failedRuns = 0;
+
+  // The live rail: a belowEditor widget that reads the active-runs map on
+  // every render (details mutate in place) and repaints on a 1 Hz tick while a
+  // run is live. `railRefresh` lets updateIndicator repaint immediately on a
+  // launch or settle instead of waiting for the next tick.
+  let railContext: ExtensionContext | undefined;
+  let railRefresh: (() => void) | undefined;
+  const mountWorkflowRail = (ctx: ExtensionContext) => {
+    // The rail is a component factory, which only the TUI renders.
+    if (!ctx.hasUI || ctx.mode !== "tui") return;
+    railContext = ctx;
+    ctx.ui.setWidget(
+      "workflow-task-rail",
+      (tui, theme) => {
+        railRefresh = () => tui.requestRender();
+        return createWorkflowRail(
+          activeDetails,
+          () => completedRuns + failedRuns,
+          theme,
+          () => tui.requestRender(),
+        );
+      },
+      { placement: "belowEditor" },
+    );
+  };
+
   const updateIndicator = () => {
     // Publish for other extensions (summaries gates recaps on it). Must run
     // even without a UI context, so publish before the UI guard.
     reportRunning("workflows", activeRuns.size);
+    railRefresh?.();
     const ui = lastUi;
     if (!ui) return;
     try {
@@ -265,8 +294,11 @@ export default function workflows(pi: ExtensionAPI) {
   // through the shared seam without importing this extension.
   registerWorkflowRuntime({ launch });
 
+  pi.registerMessageRenderer("workflow-completion", renderWorkflowCompletion);
+
   pi.on("session_start", (_event, ctx) => {
     if (ctx.hasUI) lastUi = ctx.ui;
+    mountWorkflowRail(ctx);
     updateIndicator();
   });
 
@@ -290,18 +322,21 @@ export default function workflows(pi: ExtensionAPI) {
       await Promise.race([Promise.allSettled(completions), timeout]);
       if (timer) clearTimeout(timer);
     }
+    railContext?.ui.setWidget("workflow-task-rail", undefined);
+    railContext = undefined;
+    railRefresh = undefined;
     lastUi?.setStatus("workflows", undefined);
     lastUi = undefined;
   });
 
-  pi.registerCommand("workflow-budget", {
+  pi.registerCommand("workflows-budget", {
     description:
       "Show or set the default workflow output-token budget (e.g. `500k`, `1.5m`, `off`)",
     handler: async (rawArgs, ctx) => {
       const arg = rawArgs.trim();
       if (!arg) {
         ctx.ui.notify(
-          `Workflow budget: ${formatBudget(loadDefaultBudget())}. Set with \`/workflow-budget 500k\` or \`off\`.`,
+          `Workflow budget: ${formatBudget(loadDefaultBudget())}. Set with \`/workflows-budget 500k\` or \`off\`.`,
           "info",
         );
         return;

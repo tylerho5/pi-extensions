@@ -122,6 +122,9 @@ export function createReviewLauncher(
       deliverCompletionNotification(pi, {
         level: request.level,
         findings,
+        runId: outcome.runId,
+        scope: scope.label,
+        fix: request.fix,
         instruction: request.fix
           ? "Call report_findings, apply appropriate fixes, then call it again with an outcome for every finding."
           : "Call report_findings once, summarize the findings, and do not modify files.",

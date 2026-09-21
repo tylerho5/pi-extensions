@@ -30,11 +30,13 @@ Determinism is required because resume depends on it. `Math.random()`, `Date.now
 
 `model`, `provider`, and `effort` remain for a user-requested override and bypass tiers. An override defaults to the configured subagent model (`loadSubagentModels().pi`), not the parent session model, so fan-out does not burn an expensive interactive model. `model-aliases.ts` resolves the model option in a chain: an exact `provider/id` or bare registry id, then `modelAliases` from `workflows.json`, then a known CC alias with no mapping (`haiku`, `sonnet`, `opus`, `fable`) falling back to the configured default. Exact hits pass a cost ceiling check, where `exceedsCostCeiling` rejects an agent-picked expensive model and `affordableModels` supplies alternatives. Alias-resolved models skip the ceiling because the user configured them. A broken alias target fails with a `fix modelAliases` error. Agents record `requestedModel` and render as `alias→resolved-id`. `effort` sets a thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), and omitting it inherits the parent level from `pi.getThinkingLevel()`.
 
-Run-wide caps: concurrency is `DEFAULT_CONCURRENCY` = `min(16, max(2, cores - 2))`, which is CC's formula. Total agent calls are capped at `MAX_AGENT_CALLS` 1000, and past it `agent()` resolves `null`. `parallel()` and `pipeline()` accept at most 4096 items and throw beyond that rather than truncating. `budgetTokens`, or the `/workflow-budget` default, sets a hard output-token ceiling. Once `spent()` reaches `total`, the next `agent()` throws `WorkflowBudgetExceededError` inside the script while in-flight agents finish. An unset budget never blocks and `budget.remaining()` returns `Infinity`.
+Run-wide caps: concurrency is `DEFAULT_CONCURRENCY` = `min(16, max(2, cores - 2))`, which is CC's formula. Total agent calls are capped at `MAX_AGENT_CALLS` 1000, and past it `agent()` resolves `null`. `parallel()` and `pipeline()` accept at most 4096 items and throw beyond that rather than truncating. `budgetTokens`, or the `/workflows-budget` default, sets a hard output-token ceiling. Once `spent()` reaches `total`, the next `agent()` throws `WorkflowBudgetExceededError` inside the script while in-flight agents finish. An unset budget never blocks and `budget.remaining()` returns `Infinity`.
 
 Every settled `agent()` appends one line to `journal.jsonl` with `{ index, key, label, phase?, result }`. `key` is the sha256 of canonical JSON over `{ prompt, options }` with sorted keys, truncated to 32 hex, so option order does not matter. `createResumePlan` replays the longest unchanged prefix. The first mismatch, whether a different key, a missing entry, or an out-of-order index, ends replay for the rest of the run. Matched calls return cached results instantly and mark `cached: true`.
 
-`background` defaults to `true`, and `(params.background ?? true) && ctx.hasUI` forces it off in a headless session, where there is no UI to deliver the follow-up to. A background run returns a launch message immediately and delivers `[Background workflow <runId> <status>]` plus the full report through `pi.sendUserMessage(..., { deliverAs: "followUp" })`. A blocking run emits tool-block progress throttled at 120 ms and throws on a non-completed status, which is how pi marks the tool failure. `session_shutdown` aborts and settles every active run.
+`background` defaults to `true`, and `(params.background ?? true) && ctx.hasUI` forces it off in a headless session, where there is no UI to deliver the follow-up to. A background run returns a launch message immediately and delivers the completion follow-up as a `workflow-completion` custom message through `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })`. The model-facing content is unchanged (`[Background workflow <runId> <status>]` plus the full report), and the registered renderer paints a digest instead of the report. A blocking run emits tool-block progress throttled at 120 ms and throws on a non-completed status, which is how pi marks the tool failure. `session_shutdown` aborts and settles every active run.
+
+The live rail. A `belowEditor` widget (`workflow-task-rail`) shows the active runs. A header carries the running and finished counts, and each row carries the run name, the current phase, the settled and total agent counts, and the elapsed time. The rail renders at most 8 rows and collapses the rest into a `… N more` line. It re-reads the active-runs map on every render, so details that mutate in place (`currentPhase`, the growing agents array) stay current. A 1 Hz tick repaints the elapsed times while a run is live, and `updateIndicator()` repaints immediately on a launch or settle. The widget hides while nothing runs, and it has no key handling.
 
 Each agent runs with normal trust-aware resources (`createWorkflowResources` calls `createChildResources` in `shared/child-session.ts`), the same `childToolPolicy()` denylist subagents use, and an optional one-shot `structured_output` tool when the script passes `schema`. The denylist covers `subagent_spawn`, `subagent_wait`, `subagent_cancel`, `subagent_check`, `subagent_list`, `workflow`, `ask_user_question`, `enter_worktree`, `exit_worktree`, and `code_review`. A schema must be a bounded JSON object of at most 10,000 nodes and depth 24, with no `__proto__`, `constructor`, or `prototype` keys, and it wraps through `Type.Unsafe` so every JSON Schema keyword survives. Children receive `WORKFLOW_AGENT_SYSTEM_INSTRUCTION` or `STRUCTURED_OUTPUT_SYSTEM_INSTRUCTION`. `isolation: 'worktree'` runs one agent in a fresh detached git worktree on branch `wf/<runId>/<agentIndex>-<slug>`, removes it when the agent left it unchanged, and keeps it while logging the path and changed-file count when it did not.
 
@@ -57,7 +59,7 @@ Parameters (typebox `WorkflowParams`, all optional):
 | `args` | string | Optional JSON string exposed to the script as `args`. Parsed when valid JSON, otherwise passed through as the raw string. |
 | `background` | boolean | Default `true`: return the run id immediately and deliver a follow-up on completion. `false` blocks with live progress in the tool block. |
 | `resumeFromRunId` | string | `wf_` plus 12 hex. Replays the unchanged `agent()` prefix from that run's journal. An invalid id is rejected. |
-| `budgetTokens` | number | Output-token ceiling for this run. Floored, and a value of 0 or less falls back to the `/workflow-budget` default. |
+| `budgetTokens` | number | Output-token ceiling for this run. Floored, and a value of 0 or less falls back to the `/workflows-budget` default. |
 
 Return shape:
 
@@ -88,15 +90,23 @@ Every `agent()` call must be awaited, and the script must return a JSON-serializ
 
 | Command | Purpose |
 |---|---|
-| `/workflow-budget` | Shows the current default with no argument. Otherwise accepts `500k`, `1.5m`, `off`, `none`, `unlimited`, or a plain token count. The three words all mean unlimited. Persists to `workflow-budget.json` through `parseBudget`, `saveDefaultBudget`, and `loadDefaultBudget`. |
+| `/workflows-budget` | Shows the current default with no argument. Otherwise accepts `500k`, `1.5m`, `off`, `none`, `unlimited`, or a plain token count. The three words all mean unlimited. Persists to `workflow-budget.json` through `parseBudget`, `saveDefaultBudget`, and `loadDefaultBudget`. |
 | `/workflows` | Opens the full-screen dashboard in the TUI: a run list, a per-run detail with a phases sidebar and an agents panel, then a per-agent transcript. `j` and `k` move, `g` and `G` jump, `l`, right, and enter descend, `h`, left, and esc ascend, and `s` writes `report.md` into the run directory. The view refreshes every 500 ms while a run is live, and opening it acknowledges finished runs and resets the footer counters. An optional `runId` argument opens that run directly, matched exactly or by a trailing segment of the id. Outside the TUI it prints a plain listing or offers a `ctx.ui.select` picker. |
+
+### Messages and renderers
+
+| custom type | delivery | renderer |
+|---|---|---|
+| `workflow-completion` | `{ deliverAs: "followUp", triggerTurn: true }`, visible | `renderWorkflowCompletion` |
+
+The model-facing content stays the completion report. The renderer reads `details` (`runId`, `name`, `status`, `elapsed`, `agents`, `currentPhase`, `artifactsDir`), so the transcript never paints the report verbatim. Collapsed shows the digest (`✦ workflow <name> · <status> · N agents · <elapsed>`) plus the `/workflows <runId>` pointer. Expanded shows the report capped at 4000 characters and a pointer to the run directory, where `result.json` and `report.md` live. The dashboard `s` key writes `report.md`.
 
 ### Events
 
 | Event | Handler |
 |---|---|
-| `session_start` | Captures `lastUi = ctx.ui` when `ctx.hasUI` and refreshes the indicator. |
-| `session_shutdown` | Aborts every active run with `Session is shutting down`, settles each with `abort: true`, waits up to 8 s for completions, and clears the `workflows` footer status. |
+| `session_start` | Captures `lastUi = ctx.ui` when `ctx.hasUI`, mounts the rail widget, and refreshes the indicator. |
+| `session_shutdown` | Aborts every active run with `Session is shutting down`, settles each with `abort: true`, waits up to 8 s for completions, and clears the `workflows` footer status and the rail widget. |
 
 `updateIndicator()` publishes `reportRunning("workflows", activeRuns.size)` to `shared/agent-activity.ts`, which summaries gates recaps on, and, when a UI exists, sets the `workflows` footer status through `formatActivityStatus(theme, "workflows", { running, done, failed })`. Finished-run counters stay visible until the dashboard acknowledges them.
 
@@ -104,7 +114,7 @@ Every `agent()` call must be awaited, and the script must return a JSON-serializ
 
 | Path | Contents |
 |---|---|
-| `workflow-budget.json` | In the agent directory from `getAgentDir()`. `{ "tokens": number \| null }`, written by `/workflow-budget`. |
+| `workflow-budget.json` | In the agent directory from `getAgentDir()`. `{ "tokens": number \| null }`, written by `/workflows-budget`. |
 | `<agent dir>/workflows/*.js` | User-level saved workflow definitions. |
 | `<cwd>/.pi/workflows/*.js` | Project-level saved definitions, which shadow user ones of the same name. |
 | `workflows.json` | In the agent directory. `{ "extraDirs": ["~/.claude/workflows"], "modelAliases": { "sonnet": "deepseek/deepseek-v4-pro" } }`. `loadRegistrySettings()` re-reads it on every registry scan and every agent model resolution, so edits take effect immediately. |
@@ -134,6 +144,8 @@ A run directory holds `script.js`, `args.json` when args were passed, `workflow.
 - `worktree.ts` exports `isGitRepo(cwd)` and `createWorktree({ cwd, runId, agentIndex, label })`, which returns `{ path, branch, release() }` with `release()` giving `{ removed, changedFiles }`.
 - `serialization.ts` exports `safeStringify`, `toSerializable`, `truncateUtf8`, and `writeFileAtomic`. The whole extension uses these for artifact writes.
 - `dashboard.ts` exports `showWorkflowDashboard(ctx, getActive, initialRunId?)`, `sessionWorkflowRunIds(ctx)`, `loadRunEntries(...)`, the class `WorkflowDashboard`, and the type `RunEntry`.
+- `rail.ts` exports `MAX_RAIL_ROWS`, `workflowRailModel`, `renderWorkflowRail`, `createWorkflowRail`, and the types `WorkflowRailRow` and `WorkflowRailModel`. The model and the line renderer are pure, so they unit-test over a fake active-runs map.
+- `completion.ts` exports `COMPLETION_REPORT_MAX_CHARS` (4000), `WorkflowCompletionDetails`, `buildWorkflowCompletionDetails`, and `renderWorkflowCompletion`.
 - `prototype-scheduling/` is a throwaway prototype with a scheduler simulation and TUI, run through `npm run prototype:scheduling`. It answered the barrier-versus-pipeline question in July 2026 and motivated `pipeline()` and the CC concurrency formula. It is not part of the runtime surface.
 
 ## Examples

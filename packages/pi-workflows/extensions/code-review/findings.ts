@@ -39,6 +39,40 @@ export interface CompletionNotification {
   level: Effort;
   findings: Finding[];
   instruction?: string;
+  /** Run id and human scope label, for the digest pointer. */
+  runId?: string;
+  scope?: string;
+  /** True when --fix handed the findings back for edits. */
+  fix?: boolean;
+}
+
+/** The short summary the completion renderer paints instead of the full report. */
+export interface CompletionDigest {
+  level: Effort;
+  scope?: string;
+  count: number;
+  confirmed: number;
+  plausible: number;
+  /** The first five findings, already ranked most-severe first. */
+  top: Finding[];
+  runId?: string;
+  fix: boolean;
+}
+
+export function completionDigest(
+  notification: CompletionNotification,
+): CompletionDigest {
+  const findings = notification.findings;
+  return {
+    level: notification.level,
+    ...(notification.scope ? { scope: notification.scope } : {}),
+    count: findings.length,
+    confirmed: findings.filter((f) => f.verdict === "CONFIRMED").length,
+    plausible: findings.filter((f) => f.verdict === "PLAUSIBLE").length,
+    top: findings.slice(0, 5),
+    ...(notification.runId ? { runId: notification.runId } : {}),
+    fix: notification.fix ?? false,
+  };
 }
 
 export interface FailureNotification {

@@ -5,7 +5,8 @@
  */
 
 import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { completionDigest } from "./findings.ts";
 import type {
   CompletionNotification,
   FailureNotification,
@@ -58,11 +59,51 @@ function rowLine(f: Finding, theme: Theme): string {
   return `  ${dot} ${loc} ${cat}${verdict}${outcome}  ${theme.fg("toolOutput", f.short_summary)}`;
 }
 
+/**
+ * The completion renderer paints a digest, not the report: the accent header,
+ * the verdict counts, up to five findings rows, and a pointer to the findings
+ * message and the run directory. The findings rows own expansion (ctrl+o), so
+ * the digest has none. The message content stays the full machine-usable
+ * report for the parent model.
+ */
 export const renderCompletionNotification: MessageRenderer<
   CompletionNotification
 > = (message, _options, theme) => {
-  const content = typeof message.content === "string" ? message.content : "";
-  return new Text(theme.fg("accent", content), 0, 0);
+  const details = (message.details ?? {}) as Partial<CompletionNotification>;
+  const digest = completionDigest({
+    level: details.level ?? "medium",
+    findings: details.findings ?? [],
+    runId: details.runId,
+    scope: details.scope,
+    fix: details.fix,
+  });
+
+  let head = theme.fg("accent", theme.bold("code review complete"));
+  head += theme.fg("muted", ` · ${digest.level}`);
+  if (digest.scope) head += theme.fg("muted", ` · ${digest.scope}`);
+  if (digest.fix) head += theme.fg("warning", " · fix");
+
+  const lines = [
+    head,
+    theme.fg(
+      "muted",
+      `${digest.count} finding${digest.count === 1 ? "" : "s"} · ` +
+        `${digest.confirmed} confirmed · ${digest.plausible} plausible`,
+    ),
+  ];
+  for (const f of digest.top) lines.push(rowLine(f, theme));
+  lines.push(
+    theme.fg(
+      "dim",
+      `findings below${digest.runId ? ` · /workflows ${digest.runId}` : ""} · report.md in the run directory`,
+    ),
+  );
+
+  return {
+    render: (width: number) =>
+      lines.map((line) => truncateToWidth(line, width)),
+    invalidate: () => {},
+  };
 };
 
 export const renderFailureNotification: MessageRenderer<FailureNotification> = (

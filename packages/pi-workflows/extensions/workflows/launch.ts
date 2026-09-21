@@ -42,6 +42,7 @@ import {
 } from "../shared/subagent-models.ts";
 import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
 import { loadDefaultBudget, WorkflowBudget } from "./budget.ts";
+import { buildWorkflowCompletionDetails } from "./completion.ts";
 import { DEFAULT_CONCURRENCY, RunController } from "./controller.ts";
 import {
   appendJournalEntry,
@@ -811,13 +812,20 @@ export function createLaunch(deps: LaunchDeps) {
           updateIndicator();
           if (sendFollowUp) {
             try {
-              pi.sendUserMessage(
-                buildBackgroundWorkflowFollowUp({
-                  runId,
-                  status: details.status,
-                  result: buildWorkflowResultMessage(details, runDir),
-                }),
-                { deliverAs: "followUp" },
+              pi.sendMessage(
+                {
+                  customType: "workflow-completion",
+                  display: true,
+                  // Byte-identical to the plain user message this replaced;
+                  // the renderer reads details instead of painting content.
+                  content: buildBackgroundWorkflowFollowUp({
+                    runId,
+                    status: details.status,
+                    result: buildWorkflowResultMessage(details, runDir),
+                  }),
+                  details: buildWorkflowCompletionDetails(details, runDir),
+                },
+                { deliverAs: "followUp", triggerTurn: true },
               );
             } catch {
               // Session may be shutting down.

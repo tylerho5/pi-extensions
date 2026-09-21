@@ -17,7 +17,7 @@ export const WORKFLOW_PARAMETER_DESCRIPTIONS = {
   resumeFromRunId:
     "Run id of a prior workflow to resume from. Completed agent() calls with unchanged (prompt, options) return their cached results instantly; only edited or new calls re-run.",
   budgetTokens:
-    "Output-token target for this run, exposed to the script as `budget`. A HARD ceiling: once reached, further agent() calls throw. Defaults to the /workflow-budget setting (unlimited unless configured).",
+    "Output-token target for this run, exposed to the script as `budget`. A HARD ceiling: once reached, further agent() calls throw. Defaults to the /workflows-budget setting (unlimited unless configured).",
 };
 
 /** Defines the workflow DSL, constraints, reliability guidance, and model-authored task examples. */
@@ -53,7 +53,7 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
   "• log(message) — emit a progress line to the user; it is also replayed in the run's completion report.",
   "• args — the parsed value of the `args` tool parameter (or undefined).",
   '• await workflow(name, args?) — run a saved workflow inline as a sub-step and return whatever it returns. The child shares this run\'s concurrency cap, agent counter, abort signal, and budget; its agents appear under a "▸ name" log line. Nesting is one level only: workflow() inside a nested run throws. Throws on an unknown name or a child syntax error; catch to handle gracefully.',
-  "• budget: {total: number|null, spent(): number, remaining(): number} — the run's output-token target, from the `budgetTokens` parameter or the user's /workflow-budget default. `budget.total` is null if no target was set. The target is a HARD ceiling, not advisory: once `spent()` reaches `total`, further `agent()` calls throw. Use for dynamic loops: `while (budget.total && budget.remaining() > 50_000) { ... }`, or static scaling: `const FLEET = budget.total ? Math.floor(budget.total / 100_000) : 5`.",
+  "• budget: {total: number|null, spent(): number, remaining(): number} — the run's output-token target, from the `budgetTokens` parameter or the user's /workflows-budget default. `budget.total` is null if no target was set. The target is a HARD ceiling, not advisory: once `spent()` reaches `total`, further `agent()` calls throw. Use for dynamic loops: `while (budget.total && budget.remaining() > 50_000) { ... }`, or static scaling: `const FLEET = budget.total ? Math.floor(budget.total / 100_000) : 5`.",
   "",
   "Every agent() call must be awaited — the run fails if the script returns with an unawaited or unsettled call. Pass a `schema` whenever a later step branches on the result, so you get typed fields instead of prose.",
   "",
