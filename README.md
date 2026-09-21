@@ -13,7 +13,7 @@ Extensions for the pi coding agent, published as individual npm packages under t
 | [`@tylerho/pi-background-terminals`](packages/pi-background-terminals) | published 0.2.1 | Runs long-lived background shell processes started by the model, inspectable and killable via /ps. |
 | [`@tylerho/pi-clear`](packages/pi-clear) | wip (source only) | Registers `/clear` as an alias for pi's built-in `/new`, the command Claude Code users already type. |
 | [`@tylerho/pi-collapsed-previews`](packages/pi-collapsed-previews) ⚠️ | wip (source only) | Collapses hidden thinking blocks and edit-tool diffs to one-line summaries via runtime prototype patches on pi's TUI. |
-| [`@tylerho/pi-copy-all`](packages/pi-copy-all) | no record | Copies the current thread's user and assistant messages to the clipboard as plain text. |
+| [`@tylerho/pi-copy-all`](packages/pi-copy-all) | published 0.1.1 | Copies the current thread's user and assistant messages to the clipboard as plain text. |
 | [`@tylerho/pi-expanded-footer`](packages/pi-expanded-footer) | no record | Replaces the default footer with a Claude Code-style layout: model, context usage, cost, branch, worktree. |
 | [`@tylerho/pi-file-search`](packages/pi-file-search) | published 0.1.1 | Adds native fd and rg tools for fast, gitignore-aware file search with automatic binary resolution. |
 | [`@tylerho/pi-git-info`](packages/pi-git-info) | published 0.1.1 | On-demand /lg diff browser and /pr lookup for the current branch's local changes and open pull request. |
