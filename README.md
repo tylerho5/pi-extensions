@@ -10,7 +10,7 @@ Extensions for the pi coding agent, published as individual npm packages under t
 |---|---|---|
 | [`@tylerho/pi-advisor`](packages/pi-advisor) | no record | A stronger reviewer model the main agent can consult mid-turn for strategic guidance, ported from Claude Code. |
 | [`@tylerho/pi-ask-user-question`](packages/pi-ask-user-question) | no record | Claude Code-shaped batch questions: 1-4 per call, each with a header, 2-4 options, optional multi-select and per-option previews. |
-| [`@tylerho/pi-background-terminals`](packages/pi-background-terminals) | no record | Runs long-lived background shell processes started by the model, inspectable and killable via /ps. |
+| [`@tylerho/pi-background-terminals`](packages/pi-background-terminals) | published 0.2.0 | Runs long-lived background shell processes started by the model, inspectable and killable via /ps. |
 | [`@tylerho/pi-clear`](packages/pi-clear) | wip (source only) | Registers `/clear` as an alias for pi's built-in `/new`, the command Claude Code users already type. |
 | [`@tylerho/pi-collapsed-previews`](packages/pi-collapsed-previews) ⚠️ | wip (source only) | Collapses hidden thinking blocks and edit-tool diffs to one-line summaries via runtime prototype patches on pi's TUI. |
 | [`@tylerho/pi-copy-all`](packages/pi-copy-all) | no record | Copies the current thread's user and assistant messages to the clipboard as plain text. |

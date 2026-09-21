@@ -100,6 +100,12 @@
       "builtFrom": {
         "sourceHash": "sha256:32b0e48d17b3f11ecd9de038638c9dfddbb82d817e4f7f912f759cd904faf214",
         "at": "2026-09-21T02:03:36.489Z"
+      },
+      "published": {
+        "version": "0.2.0",
+        "sourceHash": "sha256:32b0e48d17b3f11ecd9de038638c9dfddbb82d817e4f7f912f759cd904faf214",
+        "at": "2026-09-21T02:45:57.831Z",
+        "integrity": "sha512-SuMMASSo/AWK5MaFip8jp+n5KSByuHBLwV7eGSB7fH3ah2auJZMfVJWFBRmVjgei9Wijj+Uhe+p2a614FC5s9g=="
       }
     },
     "@tylerho/pi-ask-user-question": {
