@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-summaries",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Generates a compact recap of each agent run and appends it to the session once the run settles.",
   "license": "MIT",
