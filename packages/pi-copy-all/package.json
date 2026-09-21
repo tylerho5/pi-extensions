@@ -1,6 +1,6 @@
 {
   "name": "@tylerho/pi-copy-all",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Copies the current thread's user and assistant messages to the clipboard as plain text.",
   "license": "MIT",
