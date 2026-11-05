@@ -80,10 +80,10 @@
         "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
-        "version": "0.2.1",
-        "sourceHash": "sha256:302cf2e6f4bb52e1e8d823165e7dcf8d1a8d0c4d55e77946e1c23cf97d9241d6",
-        "at": "2026-09-21T03:37:11.161Z",
-        "integrity": "sha512-Hw/QhQYrAy4a+WSUGW5laOlwc/TXTAWomYGRHjmDjpG5OY3cIHtG/Lml7OaNw5W1p0wO3P1EZxMO9EY+v6CL/w=="
+        "version": "0.2.2",
+        "sourceHash": "sha256:349a5e811eb61c4c087e7a204788978659931bca4ac2c1ffe3c8f44747c7faa1",
+        "at": "2026-11-05T22:51:46.209Z",
+        "integrity": "sha512-h75+VIkXOGyis+ohaRD6BdcxbPlqBXkwP1YxPAPneP9xalxN6c0TdocCYdU+P9DYngKH5vv9G1kXLZKccpcO6A=="
       }
     },
     "@tylerho/pi-web-fetch": {
