@@ -10,10 +10,10 @@
         "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
-        "version": "0.2.1",
-        "sourceHash": "sha256:cff6bfe1aed25877549aac1490b6d5021cf1c5b6c8501a159df371702e7741ff",
-        "at": "2026-09-21T03:37:02.021Z",
-        "integrity": "sha512-uf0FP/50WtqM0FBzxUDJJ3fo4uyEefMBEdpjbEarugCYGi1kpUQFodjeYrltRmFbrpW6Vk0XPWpvq+9tjCVYew=="
+        "version": "0.3.0",
+        "sourceHash": "sha256:e74396f64d88fb9eef58d09d8e98e2d9649a3e11345ba4d24bc019e8f98779d4",
+        "at": "2026-11-05T22:51:35.672Z",
+        "integrity": "sha512-zE07GSCFOSJMvnQJBjJEsWpvHy6whLDNPmKo8P+9aG5VLuhH3P++NQyTssZKU3uXbFwIVRnbD2fwZIdcscaJ1Q=="
       }
     },
     "@tylerho/pi-memory": {
