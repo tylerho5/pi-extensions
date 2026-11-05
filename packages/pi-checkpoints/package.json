@@ -1,0 +1,31 @@
+{
+  "name": "@tylerho/pi-checkpoints",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Snapshots the files a session's edit tools touch, one checkpoint per prompt, and restores them with the conversation through /rewind.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-checkpoints"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-checkpoints",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/checkpoints"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {}
+}
