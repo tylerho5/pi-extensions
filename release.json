@@ -220,10 +220,10 @@
         "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
-        "version": "0.2.1",
-        "sourceHash": "sha256:ac71820b743a34b087837bfd8d43cbba63ab4ab8706285c337e830845315c369",
-        "at": "2026-09-21T03:37:28.820Z",
-        "integrity": "sha512-DZzR6zfSCmjsuJBqZ8DzPR8tNrXGxVX1J3xv9WjrqxV1P6CcRUm2Rir87i0GSYm0d/yxMzHXZvgNU4BvSnq2fw=="
+        "version": "0.2.2",
+        "sourceHash": "sha256:a8e0398e2d9eeb30df8a20695e7442764ddbd6d9b0d50aa502281b6fd30649cd",
+        "at": "2026-11-05T22:51:48.312Z",
+        "integrity": "sha512-xTt/JPFXRTv5dsyTrhcLBEaW2zaMhIq1zlwDAiX4jThhEhLiuq25DNnMExMJiOIShlrjfApp+W7OAEn44IqWvg=="
       }
     },
     "@tylerho/pi-collapsed-previews": {
