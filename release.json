@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-21T02:55:22.300Z",
+  "generatedAt": "2026-11-05T22:47:53.090Z",
   "packages": {
     "@tylerho/pi-subagents": {
-      "version": "0.2.1",
+      "version": "0.3.0",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:cff6bfe1aed25877549aac1490b6d5021cf1c5b6c8501a159df371702e7741ff",
-        "at": "2026-09-21T02:55:22.300Z"
+        "sourceHash": "sha256:e74396f64d88fb9eef58d09d8e98e2d9649a3e11345ba4d24bc019e8f98779d4",
+        "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
         "version": "0.2.1",
@@ -17,11 +17,11 @@
       }
     },
     "@tylerho/pi-memory": {
-      "version": "0.2.1",
+      "version": "0.3.0",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:e9b63a5ba6d2bcefaad66ce00d0a9426f2383cca70483ea692420ad325bcb283",
-        "at": "2026-09-21T02:03:36.489Z"
+        "sourceHash": "sha256:9cc5b43714be5cf86c18b0ed8d2514bd17c6125839ba03bae4bb03005f819a1e",
+        "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
         "version": "0.2.1",
@@ -31,11 +31,11 @@
       }
     },
     "@tylerho/pi-summaries": {
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:b94eb6c209c7037cbd6aef34d5f79fbb136adaddf2a13943f6c576a69a6042c2",
-        "at": "2026-09-21T02:03:36.489Z"
+        "sourceHash": "sha256:065a159f23ab3bf15f8a2b8bb423aeb613f24f9c5fb4387784ec63f3146a02a0",
+        "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
         "version": "0.2.1",
@@ -45,11 +45,11 @@
       }
     },
     "@tylerho/pi-advisor": {
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:4cd1aff8b2ec9ef8b6654bb06f6b417ec5a1ba3a72cea913ee1aea72fa5ea504",
-        "at": "2026-09-21T02:03:36.489Z"
+        "sourceHash": "sha256:56c7d4c268afc975a2571ab381fa80faffb10864e279fc913c161be5891d2471",
+        "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
         "version": "0.2.1",
@@ -59,11 +59,11 @@
       }
     },
     "@tylerho/pi-reminders": {
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:e2e3885bee27d03df3743078fa5051687f10442ef873ceaebfd1f17adb951b63",
-        "at": "2026-09-21T02:03:36.489Z"
+        "sourceHash": "sha256:a246e60c83cd02a1c49c872efc9bb1f678b4d8b720a52b688f010d2154c72588",
+        "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
         "version": "0.3.0",
@@ -73,11 +73,11 @@
       }
     },
     "@tylerho/pi-worktree": {
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:302cf2e6f4bb52e1e8d823165e7dcf8d1a8d0c4d55e77946e1c23cf97d9241d6",
-        "at": "2026-09-21T02:03:36.489Z"
+        "sourceHash": "sha256:349a5e811eb61c4c087e7a204788978659931bca4ac2c1ffe3c8f44747c7faa1",
+        "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
         "version": "0.2.1",
@@ -213,11 +213,11 @@
       }
     },
     "@tylerho/pi-expanded-footer": {
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:ac71820b743a34b087837bfd8d43cbba63ab4ab8706285c337e830845315c369",
-        "at": "2026-09-21T02:03:36.489Z"
+        "sourceHash": "sha256:a8e0398e2d9eeb30df8a20695e7442764ddbd6d9b0d50aa502281b6fd30649cd",
+        "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
         "version": "0.2.1",
@@ -259,17 +259,33 @@
       }
     },
     "@tylerho/pi-workflows": {
-      "version": "0.2.1",
+      "version": "0.3.0",
       "status": "stable",
       "builtFrom": {
-        "sourceHash": "sha256:0f6402d482a128a00ccbb958972217b9bc02131a530f3ba1f05c6100d4237893",
-        "at": "2026-09-21T02:45:55.810Z"
+        "sourceHash": "sha256:116251aa1525fd5470a4c881d3fb349179711231f9b94a310cd2aa757798fc67",
+        "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
         "version": "0.2.1",
         "sourceHash": "sha256:0f6402d482a128a00ccbb958972217b9bc02131a530f3ba1f05c6100d4237893",
         "at": "2026-09-21T03:36:59.730Z",
         "integrity": "sha512-sOJtzlQ8EXcuB0c7rNBhkgibx4Ewd/8Zt10rHyig/rbz7NH1juPYiTzRyNHm7nLkkw1fmYBK8iYPuGN87xcq5A=="
+      }
+    },
+    "@tylerho/pi-checkpoints": {
+      "version": "0.1.0",
+      "status": "stable",
+      "builtFrom": {
+        "sourceHash": "sha256:f13a9c5a3ede0b406024071c3f624d942adf7c3f09a986230aa19f5bfe157486",
+        "at": "2026-11-05T22:47:53.090Z"
+      }
+    },
+    "@tylerho/pi-turn-end": {
+      "version": "0.1.0",
+      "status": "wip",
+      "builtFrom": {
+        "sourceHash": "sha256:1806fecef56f718716b2d84d77320a67ab6df16feddea826f724e056601619c0",
+        "at": "2026-11-05T22:47:53.090Z"
       }
     }
   }
