@@ -7,8 +7,8 @@
  * { pi, claude, costCeiling } files migrate in memory.
  *
  * Defaults are user intent, so they are never ceiling-checked: the ceiling only
- * applies to a model an agent picked for itself. Set the tiers with
- * /subagent-model and the ceiling with /subagent-cost.
+ * applies to a model an agent picked for itself. Set tiers and the ceiling
+ * with /subagents-menu.
  */
 
 import { randomUUID } from "node:crypto";
@@ -44,7 +44,7 @@ export interface ClaudeDefaults {
 
 /**
  * Output-price ceiling in USD per million tokens, inclusive. Disabled by
- * default; set a local value with /subagent-cost, or override per launch with
+ * default; set a local value with /subagents-menu, or override per launch with
  * PI_SUBAGENT_COST_CEILING.
  */
 export const DEFAULT_COST_CEILING = null;
@@ -79,6 +79,14 @@ export const CLAUDE_MODEL_CHOICES = [
 /** The fixed semantic tiers a caller picks for delegated work. */
 export const DELEGATION_TIERS = ["fast", "standard", "deep", "claude"] as const;
 export type DelegationTier = (typeof DELEGATION_TIERS)[number];
+
+/**
+ * Tiers the subagent tool surface exposes to callers. The `claude` tier and
+ * harness stay in the config and resolution code (workflows, the picker's
+ * internal list) but are not offered by `subagent_spawn` or `/subagents-menu`,
+ * so every spawn runs on the native pi harness.
+ */
+export const PI_DELEGATION_TIERS = ["fast", "standard", "deep"] as const;
 
 export interface PiTarget {
   readonly harness: "pi";
@@ -399,6 +407,41 @@ function tierTarget(
 const harnessList = (supported: readonly ("pi" | "claude")[]) =>
   supported.join(", ") || "none";
 
+/** Explicit fields win over the preset; a new model makes the target explicit for cost policy. */
+function overrideTier(
+  preset: ResolvedDelegationTarget,
+  selection: DelegationSelection,
+  supportedHarnesses: readonly ("pi" | "claude")[],
+): ResolvedDelegationTarget {
+  const harness = selection.harness ?? preset.harness;
+  if (!supportedHarnesses.includes(harness)) {
+    throw new Error(
+      `Harness "${harness}" is not supported here. Supported harnesses: ${harnessList(supportedHarnesses)}.`,
+    );
+  }
+  const effort = explicitEffort(selection.effort, preset.effort);
+  const model = nonEmpty(selection.model);
+  if (!model) {
+    if (harness !== preset.harness) {
+      throw new Error(
+        `Harness "${harness}" differs from the tier's "${preset.harness}" harness and requires an explicit "model".`,
+      );
+    }
+    return { ...preset, effort } as ResolvedDelegationTarget;
+  }
+  if (harness === "claude") {
+    return { harness, model, effort, source: { kind: "explicit" } };
+  }
+  const split = splitPiModel(model);
+  return {
+    harness,
+    ...(split.provider === undefined ? {} : { provider: split.provider }),
+    model: split.model,
+    effort,
+    source: { kind: "explicit" },
+  };
+}
+
 /** Pure mapping from a caller selection to one normalized delegation target. */
 export function resolveDelegationTarget(options: {
   readonly config: DelegationConfig;
@@ -412,12 +455,13 @@ export function resolveDelegationTarget(options: {
     selection.effort !== undefined;
 
   if (selection.tier !== undefined) {
-    if (explicit) {
-      throw new Error(
-        `Tier "${selection.tier}" cannot be combined with an explicit harness, model, or effort.`,
-      );
-    }
-    return tierTarget(config, selection.tier, supportedHarnesses);
+    if (!explicit)
+      return tierTarget(config, selection.tier, supportedHarnesses);
+    return overrideTier(
+      tierTarget(config, selection.tier, ["pi", "claude"]),
+      selection,
+      supportedHarnesses,
+    );
   }
 
   if (!explicit) return tierTarget(config, "standard", supportedHarnesses);
@@ -492,6 +536,6 @@ export function costCeilingMessage(options: {
     `$${ceiling}/Mtok subagent ceiling. ` +
     (affordable ? `Try one of: ${affordable}. ` : "") +
     `Omit "model" to use the configured default, or ask the user to run ` +
-    `/subagent-cost if this task really needs a pricier model.`
+    `/subagents-menu if this task really needs a pricier model.`
   );
 }

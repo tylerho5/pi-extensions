@@ -68,7 +68,7 @@ Every write goes through `saveAdvisorSettings`, and a failed save notifies `Coul
 
 ### Config file
 
-`ADVISOR_SETTINGS_PATH` is `join(getAgentDir(), "advisor.json")`, which resolves to `~/.pi/agent/advisor.json`. The file is per machine and gitignored.
+`ADVISOR_SETTINGS_PATH` is `join(getAgentDir(), "advisor.json")`, which resolves to `~/.pi/agent/advisor.json`. The file is user configuration and is never shipped in the package.
 
 ```json
 {
