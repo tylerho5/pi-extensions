@@ -1,16 +1,16 @@
 /**
- * Subagents — spawn background subagents on one of two backends
- * (pi, Claude Code) unified behind a single Effect service interface.
+ * Subagents — spawn background subagents on the native pi harness. The
+ * Claude Agent SDK backend stays in the manager behind the same Effect
+ * service interface but is no longer reachable from the tool surface.
  *
  * Tools (for the parent LLM):
  * - subagent_spawn: spawn on a semantic delegation tier (or an explicit
- *   harness/model/effort override); description, prompt, optional name,
- *   working_dir, run_in_background, harness, model, reasoning_effort.
- *   Max 50 running at once across all backends.
+ *   model/effort override); description, prompt, optional name,
+ *   working_dir, run_in_background, model, reasoning_effort.
+ *   Max 50 running at once.
  * - subagent_cancel: stop one or more running subagents.
- * - subagent_check: non-blocking pull — a settled agent returns its full
- *   hand-back report, a running one returns status and guidance.
- * - subagent_list: list all subagents.
+ * - subagent_send: steer or resume a subagent.
+ * - subagent_list: find tracked subagent ids.
  *
  * There is no blocking wait tool: the parent keeps working or ends its turn;
  * unawaited subagents queue their result as a follow-up message when they
@@ -19,9 +19,9 @@
  * Architecture: Effect v4 generators throughout (backends -> manager ->
  * runtime); this file is the async boundary where tool handlers run effects
  * against one shared ManagedRuntime. pi runs in-process SDK sessions; claude
- * drives the Claude Agent SDK.
+ * drives the Claude Agent SDK but is not offered to callers.
  *
- * Each tier maps to a user-configured harness/model/effort in
+ * Each tier maps to a user-configured pi model and effort in
  * shared/subagent-models.json; the cost ceiling (when set) applies only to a
  * model an agent picked for itself.
  */
@@ -50,6 +50,7 @@ import {
 import {
   Markdown,
   Text,
+  truncateToWidth,
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
@@ -58,10 +59,9 @@ import {
 import { Type } from "typebox";
 import {
   costCeiling,
-  DELEGATION_TIERS,
+  PI_DELEGATION_TIERS,
   loadDelegationConfig,
   resolveDelegationTarget,
-  saveDelegationConfig,
   type DelegationTier,
 } from "../shared/subagent-models.ts";
 import {
@@ -73,15 +73,10 @@ import {
   findFocusedComponent,
   isDefaultEditorFocused,
 } from "./src/ui/focus.ts";
+import { pickEffort } from "./src/ui/model-picker.ts";
+import { runSubagentsMenu } from "./src/ui/settings-menu.ts";
 import {
-  pickEffort,
-  pickTierConfig,
-  tierTargetLabel,
-} from "./src/ui/model-picker.ts";
-import {
-  BACKEND_NAMES,
   formatElapsedBetween,
-  latestText,
   REASONING_EFFORTS,
   runRefOf,
   type SubagentRunRef,
@@ -93,14 +88,12 @@ import {
   type SubagentReadModel,
 } from "./src/manager.ts";
 import {
-  buildSubagentCheckRunningNote,
+  buildNestingPrompt,
   buildSubagentSpawnResult,
   delegationLabel,
   describeSubagent,
   SUBAGENT_CANCEL_PARAMETER_DESCRIPTIONS,
   SUBAGENT_CANCEL_TOOL_DESCRIPTION,
-  SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS,
-  SUBAGENT_CHECK_TOOL_DESCRIPTION,
   SUBAGENT_LIST_TOOL_DESCRIPTION,
   SUBAGENT_SEND_PARAMETER_DESCRIPTIONS,
   SUBAGENT_SEND_TOOL_DESCRIPTION,
@@ -110,21 +103,24 @@ import {
   SUBAGENT_SPAWN_TOOL_DESCRIPTION,
 } from "./src/prompt.ts";
 import {
+  acknowledgeDeliveredResult,
   createDeferredResultDelivery,
   runRefKey,
 } from "./src/result-delivery.ts";
 import { buildHandback } from "./src/handback.ts";
 import {
+  createSpawnGroupCoordinator,
+  type SpawnCallArgs,
+  type SpawnDetails,
+  type SpawnResult,
+} from "./src/ui/spawn-group.ts";
+import { spinnerGlyph } from "./src/ui/activity-row.ts";
+import {
   createSubagentRuntime,
   runTool,
   type SubagentRuntime,
 } from "./src/runtime.ts";
-import {
-  capChars,
-  formatContextUtilization,
-  formatCost,
-  truncationNotice,
-} from "./src/format.ts";
+import { capChars, formatCost, truncationNotice } from "./src/format.ts";
 import {
   fastSummaryTarget,
   makeSummarizeDeps,
@@ -133,22 +129,31 @@ import {
   type SummarizeResult,
 } from "./src/summarize.ts";
 import { loadSummaryConfig } from "./src/summary-config.ts";
-import { openBtwPanel } from "./src/ui/btw-panel.ts";
 import {
-  openSubagentPicker,
-  openSubagentTakeover,
-  statusGlyph,
-  statusWord,
-} from "./src/ui/takeover.ts";
+  createProgressTracker,
+  PROGRESS_MAX_TOKENS,
+  PROGRESS_NOTES_CHAR_CAP,
+  PROGRESS_PROMPT,
+  type ProgressTracker,
+} from "./src/progress.ts";
+import { loadNestingConfig } from "./src/nesting-config.ts";
+import {
+  resolveNativeDelegation,
+  type NativeDelegationBinding,
+} from "./src/delegation.ts";
+import { openBtwPanel } from "./src/ui/btw-panel.ts";
+import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
 import {
   rowComponent,
   sendCallRowText,
+  sendExpandedText,
   sendRowText,
 } from "./src/ui/send-row.ts";
+import { completionHeaderText, digestLineText } from "./src/ui/result-row.ts";
 import {
   createTaskRail,
   TaskRailController,
-  visibleRailSubagents,
+  railRows,
 } from "./src/ui/task-rail.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
@@ -168,6 +173,7 @@ interface BtwResultData {
 
 interface SubagentResultDetails {
   readonly id: string;
+  readonly runSequence?: number;
   readonly description: string;
   /** Legacy label from before the description rename. */
   readonly title?: string;
@@ -289,6 +295,11 @@ function resolveChildProjectTrust(options: {
 
 export default function (pi: ExtensionAPI) {
   let runtime: SubagentRuntime | undefined;
+  let runtimeMaxDepth: number | undefined;
+  let ownsRuntime = true;
+  let binding: NativeDelegationBinding | undefined;
+  let unboundAncestry = false;
+  let ownerSettledUnsubscribe: (() => void) | undefined;
   let managerPromise: Promise<SubagentManagerShape> | undefined;
   let sessionContext: ExtensionContext | undefined;
   let ui: ExtensionUIContext | undefined;
@@ -300,12 +311,35 @@ export default function (pi: ExtensionAPI) {
   let taskRailTui: TUI | undefined;
   let openingTaskRailSession = false;
   const taskRail = new TaskRailController();
-  const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>();
+  const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>(
+    (snap) => binding?.completion.reserveDelivery(runRefOf(snap)),
+  );
+  const spawnGroups = createSpawnGroupCoordinator();
+  const spawnSpinnerTimers = new Map<string, ReturnType<typeof setInterval>>();
+  let spawnSpinnerFrame = 0;
+  const resetSpawnGroups = () => {
+    for (const timer of spawnSpinnerTimers.values()) clearInterval(timer);
+    spawnSpinnerTimers.clear();
+    spawnSpinnerFrame = 0;
+    spawnGroups.reset();
+  };
+  const ensureSpawnSpinner = (toolCallId: string, invalidate: () => void) => {
+    if (spawnSpinnerTimers.has(toolCallId)) return;
+    const timer = setInterval(() => {
+      const view = spawnGroups.viewFor(toolCallId);
+      if (!view.members.some((member) => !member.result)) {
+        clearInterval(timer);
+        spawnSpinnerTimers.delete(toolCallId);
+        return;
+      }
+      spawnSpinnerFrame++;
+      invalidate();
+    }, 1000);
+    timer.unref?.();
+    spawnSpinnerTimers.set(toolCallId, timer);
+  };
 
-  /**
-   * One digest per run, shared between the automatic delivery and
-   * subagent_check so a checked run never pays for a second call.
-   */
+  /** Cache the digest per run so automatic delivery computes it once. */
   const summaryCache = new Map<string, Promise<SummarizeResult | undefined>>();
   let summaryConfigCache: ReturnType<typeof loadSummaryConfig> | undefined;
   const summaryConfig = () => (summaryConfigCache ??= loadSummaryConfig());
@@ -379,15 +413,67 @@ export default function (pi: ExtensionAPI) {
     return pending;
   };
 
-  const getRuntime = () => (runtime ??= createSubagentRuntime());
+  let progressTracker: ProgressTracker | undefined;
+  const summarizeProgress = async (notes: string, signal: AbortSignal) => {
+    const context = sessionContext;
+    if (!context) return undefined;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, summaryConfig().timeoutMs);
+    try {
+      const result = await summarizeReport({
+        deps: makeSummarizeDeps(context.modelRegistry),
+        target: fastSummaryTarget(),
+        report: notes,
+        inputCharCap: PROGRESS_NOTES_CHAR_CAP,
+        prompt: PROGRESS_PROMPT,
+        maxTokens: PROGRESS_MAX_TOKENS,
+        signal: controller.signal,
+      });
+      return result?.summary;
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+    }
+  };
+  const startProgressTracker = (view: SubagentReadModel) => {
+    const config = summaryConfig();
+    if (progressTracker || !config.progressEnabled) return;
+    progressTracker = createProgressTracker({
+      view,
+      intervalMs: config.progressIntervalMs,
+      summarize: summarizeProgress,
+      onChange: () => taskRailTui?.requestRender(),
+    });
+  };
+
+  const getRuntime = () => {
+    if (binding) return binding.runtime;
+    if (!runtime) {
+      runtimeMaxDepth = loadNestingConfig().maxDepth;
+      runtime = createSubagentRuntime({ maxDepth: runtimeMaxDepth });
+    }
+    return runtime;
+  };
 
   /** Resolve the manager service once per runtime and wire the extension hooks. */
+  const getOwner = (manager: SubagentManagerShape) =>
+    binding?.owner ?? manager.forOwner(null);
+
   const getManager = () => {
     managerPromise ??= getRuntime()
       .runPromise(SubagentManager)
       .then((manager) => {
-        manager.view.setOnSettled(onSettled);
-        taskRailView = manager.view;
+        if (binding)
+          ownerSettledUnsubscribe = binding.owner.subscribeSettled(onSettled);
+        else manager.view.setOnSettled(onSettled);
+        if (!binding) {
+          taskRailView = manager.view;
+          if (taskRailContext?.hasUI) startProgressTracker(manager.view);
+        }
         refreshTaskRail();
         return manager;
       });
@@ -396,6 +482,13 @@ export default function (pi: ExtensionAPI) {
 
   const deliverResult = async (snap: SubagentSnapshot) => {
     const summary = sessionContext ? await ensureSummary(snap) : undefined;
+    if (!sessionContext) throw new Error("Parent session is shutting down.");
+    // A cancel returned this run while the digest was computing.
+    if (!resultDelivery.isInFlight(runRefOf(snap))) return;
+    // A cancelled or failed native parent drops child results instead of
+    // starting a turn for them.
+    if (binding && !binding.owner.accepting())
+      throw new Error("Owning subagent has settled.");
     const handback = buildHandback({
       snapshot: snap,
       output: snap.finalText,
@@ -407,6 +500,7 @@ export default function (pi: ExtensionAPI) {
         display: true,
         details: {
           id: snap.id,
+          runSequence: snap.runSequence,
           description: snap.description,
           status: snap.status,
           errorText: snap.errorText,
@@ -431,10 +525,12 @@ export default function (pi: ExtensionAPI) {
     for (const snap of resultDelivery.drain()) {
       // A summary can outlive the session that requested it; a failed send
       // during shutdown must not strand the remaining results.
+      const ref = runRefOf(snap);
       try {
         await deliverResult(snap);
+        resultDelivery.scheduled(ref);
       } catch {
-        // The parent session may be closing; settlement stays final.
+        resultDelivery.fail(ref);
       }
     }
   };
@@ -473,8 +569,7 @@ export default function (pi: ExtensionAPI) {
       resultDelivery.consume([runRefOf(snap)]);
       return;
     }
-    // Keep the result retractable while the parent is working. A later
-    // subagent_check can consume it before agent_settled flushes follow-ups.
+    if (binding && !binding.owner.accepting()) return;
     // Defer a copy: the live snapshot keeps mutating if the subagent is
     // restarted before the deferred result flushes.
     resultDelivery.defer({ ...snap, meta: { ...snap.meta } });
@@ -489,8 +584,12 @@ export default function (pi: ExtensionAPI) {
       taskRailView
         ? (tui, theme) => {
             taskRailTui = tui;
-            return createTaskRail(taskRailView!, taskRail, theme, () =>
-              tui.requestRender(),
+            return createTaskRail(
+              taskRailView!,
+              taskRail,
+              theme,
+              () => tui.requestRender(),
+              (id) => progressTracker?.lineFor(id),
             );
           }
         : undefined,
@@ -511,20 +610,91 @@ export default function (pi: ExtensionAPI) {
   const openTaskRailSelection = async () => {
     if (openingTaskRailSession || !taskRailContext) return;
     const manager = await getManager();
-    const selected = visibleRailSubagents(manager.view, taskRail).find(
-      (snap) => snap.id === taskRail.selectedId,
+    const selected = railRows(manager.view).find(
+      (row) => row.snap.id === taskRail.selectedId,
     );
     if (!selected) return;
     openingTaskRailSession = true;
     try {
-      await openSubagentTakeover(taskRailContext, manager.view, selected.id);
+      await openSubagentTakeover(
+        taskRailContext,
+        manager.view,
+        selected.snap.id,
+      );
     } finally {
       openingTaskRailSession = false;
     }
   };
 
+  pi.on("tool_call", (event, ctx) => {
+    if (event.toolName !== "subagent_spawn") return;
+    const branch = ctx.sessionManager.getBranch();
+    const entryIndex = branch.findIndex((candidate) => {
+      if (
+        candidate.type !== "message" ||
+        candidate.message.role !== "assistant"
+      )
+        return false;
+      return candidate.message.content.some(
+        (part) => part.type === "toolCall" && part.id === event.toolCallId,
+      );
+    });
+    const entry = branch[entryIndex];
+    if (
+      entryIndex < 0 ||
+      !entry ||
+      entry.type !== "message" ||
+      entry.message.role !== "assistant"
+    )
+      return;
+
+    let responseCycleId = entry.id;
+    for (let index = entryIndex - 1; index >= 0; index--) {
+      const previous = branch[index];
+      if (previous?.type === "message" && previous.message.role === "user") {
+        responseCycleId = previous.id;
+        break;
+      }
+    }
+
+    const calls = entry.message.content.flatMap((part) =>
+      part.type === "toolCall" && part.name === "subagent_spawn"
+        ? [
+            {
+              responseCycleId,
+              toolCallId: part.id,
+              toolName: part.name,
+              args: part.arguments as SpawnCallArgs,
+            },
+          ]
+        : [],
+    );
+    spawnGroups.recordAssistantBatch(calls);
+  });
+
   pi.on("session_start", (_event, ctx) => {
+    resetSpawnGroups();
     sessionContext = ctx;
+    const resolved = resolveNativeDelegation(
+      ctx.sessionManager.getSessionId(),
+      ctx.sessionManager.getBranch(),
+    );
+    binding = resolved.binding;
+    unboundAncestry = resolved.unbound;
+    ownsRuntime = !binding;
+    if (binding) runtime = binding.runtime;
+    managerPromise = undefined;
+    if (unboundAncestry) {
+      const denied = new Set([
+        "subagent_spawn",
+        "subagent_send",
+        "subagent_cancel",
+        "subagent_list",
+      ]);
+      pi.setActiveTools(
+        pi.getActiveTools().filter((name) => !denied.has(name)),
+      );
+    }
     if (!ctx.hasUI || ctx.mode !== "tui") return;
     ui = ctx.ui;
     taskRailContext = ctx;
@@ -545,63 +715,94 @@ export default function (pi: ExtensionAPI) {
       }
       const view = taskRailView;
       if (!view) return undefined;
-      if (ctx.ui.getEditorText().trim()) return undefined;
-      const all = view.list().filter((snap) => snap.origin === "model");
-      const totalRunning = all.filter(
-        (snap) => snap.status === "running",
-      ).length;
-      const totalFinished = all.length - totalRunning;
-      const visible = visibleRailSubagents(view, taskRail);
-      if (visible.length === 0 && totalFinished === 0) return undefined;
-      if (matchesKey(data, "enter") && taskRail.expanded) {
-        void openTaskRailSelection();
-        return { consume: true };
-      }
-      if (taskRail.expanded && matchesKey(data, "up")) {
-        if (visible.length === 0) {
+      const rows = railRows(view);
+      if (taskRail.expanded) {
+        taskRail.clearTap();
+        if (rows.length === 0) {
           taskRail.reset();
-        } else if (taskRail.move(visible, -1) === "atTop") {
-          taskRail.reset();
+          return undefined;
         }
-        return { consume: true };
+        if (matchesKey(data, "enter")) {
+          void openTaskRailSelection();
+          return { consume: true };
+        }
+        if (matchesKey(data, "escape")) {
+          taskRail.reset();
+          return { consume: true };
+        }
+        if (matchesKey(data, "x")) {
+          const selected = rows.find(
+            (row) => row.snap.id === taskRail.selectedId,
+          );
+          if (selected?.snap.status === "running")
+            view.requestAbort(selected.snap.id);
+          return { consume: true };
+        }
+        if (matchesKey(data, "up")) {
+          if (taskRail.move(rows, -1) === "atTop") taskRail.reset();
+          return { consume: true };
+        }
+        if (matchesKey(data, "down")) {
+          taskRail.move(rows, 1);
+          return { consume: true };
+        }
+        // Any other key hands focus back to the editor and reaches it.
+        taskRail.reset();
+        return undefined;
       }
+      if (ctx.ui.getEditorText().trim() || rows.length === 0) return undefined;
       if (!matchesKey(data, "down")) {
         taskRail.clearTap();
         return undefined;
       }
-      if (taskRail.expanded) {
-        taskRail.clearTap();
-        if (visible.length === 0) {
-          // Expanded rail with nothing visible (e.g. toggled finished off with
-          // no running); the next meaningful state is to show finished again.
-          if (totalFinished > 0) taskRail.revealFinished();
-          return { consume: true };
-        }
-        if (taskRail.move(visible, 1) === "atBottom" && totalFinished > 0) {
-          // Bottom of the running list — don't wrap; instead surface the
-          // finished subagents from earlier in the session for ↓ to step into.
-          taskRail.revealFinished();
-        }
-        return { consume: true };
-      }
-      // Collapsed: open on a down double-tap within the controller's window.
       // A lone tap reaches normal editor navigation; a held-key repeat is
       // neither a tap nor an editor move.
       if (isKeyRepeat(data)) return { consume: true };
-      if (!taskRail.handleCollapsedDown(Date.now())) return undefined;
-      // No running subagents: open straight to the finished list so the
-      // down-twice gesture lands on real content instead of an empty rail.
-      if (totalRunning === 0 && totalFinished > 0) taskRail.revealFinished();
+      if (!taskRail.handleCollapsedDown(Date.now(), rows)) return undefined;
       return { consume: true };
     });
+  });
+
+  pi.on("before_agent_start", (event) => {
+    const depth = binding?.identity.depth ?? 0;
+    const maxDepth =
+      binding?.identity.maxDepth ??
+      runtimeMaxDepth ??
+      loadNestingConfig().maxDepth;
+    const enabled =
+      !unboundAncestry &&
+      (binding !== undefined || pi.getActiveTools().includes("subagent_spawn"));
+    return {
+      systemPrompt:
+        event.systemPrompt +
+        "\n\n" +
+        buildNestingPrompt({ depth, maxDepth, enabled }),
+    };
   });
 
   pi.on("agent_settled", () => {
     void flushResults();
   });
 
+  pi.on("message_start", (event) => {
+    acknowledgeDeliveredResult(resultDelivery, event.message);
+  });
+
   pi.on("session_shutdown", async () => {
     sessionContext = undefined;
+    const childBinding = binding;
+    binding = undefined;
+    unboundAncestry = false;
+    ownerSettledUnsubscribe?.();
+    ownerSettledUnsubscribe = undefined;
+    if (childBinding)
+      await runTool(
+        childBinding.runtime,
+        childBinding.owner.closeChildren(),
+      ).catch(() => undefined);
+    resetSpawnGroups();
+    progressTracker?.dispose();
+    progressTracker = undefined;
     taskRailContext?.ui.setWidget("subagent-task-rail", undefined);
     taskRailContext = undefined;
     taskRailView = undefined;
@@ -613,8 +814,9 @@ export default function (pi: ExtensionAPI) {
     summaryCache.clear();
     summaryConfigCache = undefined;
     ui = undefined;
-    const closing = runtime;
+    const closing = ownsRuntime ? runtime : undefined;
     runtime = undefined;
+    if (ownsRuntime) runtimeMaxDepth = undefined;
     managerPromise = undefined;
     // Disposing the runtime runs the manager finalizer, which tears down all
     // subagent scopes (and, later, their real child processes).
@@ -623,7 +825,7 @@ export default function (pi: ExtensionAPI) {
 
   // --- Tools -------------------------------------------------------------
 
-  const spawnParameters = Type.Object({
+  const spawnCommonParameters = {
     description: Type.String({
       maxLength: 200,
       description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.description,
@@ -636,11 +838,6 @@ export default function (pi: ExtensionAPI) {
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
       }),
     ),
-    tier: Type.Optional(
-      StringEnum(DELEGATION_TIERS, {
-        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.tier,
-      }),
-    ),
     working_dir: Type.Optional(
       Type.String({
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.workingDir,
@@ -651,13 +848,17 @@ export default function (pi: ExtensionAPI) {
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.runInBackground,
       }),
     ),
-    harness: Type.Optional(
-      StringEnum(BACKEND_NAMES, {
-        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
+  };
+  const spawnParameters = Type.Object({
+    ...spawnCommonParameters,
+    tier: Type.Optional(
+      StringEnum(PI_DELEGATION_TIERS, {
+        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.tier,
       }),
     ),
     model: Type.Optional(
       Type.String({
+        minLength: 1,
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.model,
       }),
     ),
@@ -668,17 +869,8 @@ export default function (pi: ExtensionAPI) {
     ),
   });
 
-  interface SpawnDetails {
-    id: string;
-    description: string;
-    cwd: string;
-    harness: string;
-    tier: DelegationTier | "explicit";
-    model: string | undefined;
-    effort: string;
-  }
-
   pi.registerTool<typeof spawnParameters, SpawnDetails>({
+    renderShell: "self",
     name: "subagent_spawn",
     label: "Spawn Subagent",
     description: SUBAGENT_SPAWN_TOOL_DESCRIPTION,
@@ -686,16 +878,25 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: SUBAGENT_SPAWN_PROMPT_GUIDELINES,
     parameters: spawnParameters,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      if (unboundAncestry)
+        throw new Error(
+          "This child transcript has no live owning manager; delegation is disabled.",
+        );
       const manager = await getManager();
+      const owner = getOwner(manager);
+      // The claude route is disabled, so an explicit model or effort implies
+      // the pi harness; omitting every target field takes the standard tier.
+      const explicitTarget =
+        params.model !== undefined || params.reasoning_effort !== undefined;
       const target = resolveDelegationTarget({
         config: loadDelegationConfig(),
         selection: {
           tier: params.tier,
-          harness: params.harness,
+          harness: explicitTarget ? "pi" : undefined,
           model: params.model,
           effort: params.reasoning_effort,
         },
-        supportedHarnesses: BACKEND_NAMES,
+        supportedHarnesses: ["pi"],
       });
 
       const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
@@ -706,7 +907,7 @@ export default function (pi: ExtensionAPI) {
       const background = params.run_in_background !== false;
       const snap = await runTool(
         getRuntime(),
-        manager.spawn(
+        owner.spawn(
           target.harness,
           {
             prompt: params.prompt,
@@ -729,6 +930,7 @@ export default function (pi: ExtensionAPI) {
                 parentTrusted: ctx.isProjectTrusted(),
               }),
               modelRegistry: ctx.modelRegistry,
+              delegation: { runtime: getRuntime(), owner },
             },
           },
           { resultMode: background ? "automatic" : "claimed" },
@@ -768,17 +970,17 @@ export default function (pi: ExtensionAPI) {
       // the wait aborts, release the claim and leave the child running.
       const run = runRefOf(snap);
       try {
-        await runTool(getRuntime(), manager.waitForRun(run), {
+        await runTool(getRuntime(), owner.waitForRun(run), {
           signal,
           interruptMessage: "Wait aborted. Subagent keeps running.",
         });
       } catch (error) {
-        await runTool(getRuntime(), manager.releaseRun(run)).catch(
+        await runTool(getRuntime(), owner.releaseRun(run)).catch(
           () => undefined,
         );
         throw error;
       }
-      const settled = manager.view.get(snap.id) ?? snap;
+      const settled = owner.view.get(snap.id) ?? snap;
       const handback = buildHandback({
         snapshot: settled,
         output: settled.finalText,
@@ -789,27 +991,75 @@ export default function (pi: ExtensionAPI) {
       };
     },
     renderCall(args, theme, context) {
-      const text =
-        (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      let content = theme.fg("toolTitle", theme.bold("subagent_spawn"));
-      if (args.description)
-        content += " " + theme.fg("dim", `"${args.description}"`);
-      if (args.name) content += " " + theme.fg("muted", `· ${args.name}`);
-      if (args.tier) content += " " + theme.fg("muted", `· ${args.tier}`);
-      else if (args.harness)
-        content += " " + theme.fg("muted", `· ${args.harness}`);
-      text.setText(content);
-      return text;
+      spawnGroups.registerRow(context.toolCallId, context.invalidate);
+      const initial = spawnGroups.viewFor(context.toolCallId);
+      if (initial.kind === "sibling" && !context.expanded)
+        return new Text("", 0, 0);
+      if (initial.kind === "first" && !context.expanded) {
+        ensureSpawnSpinner(context.toolCallId, context.invalidate);
+        return {
+          render(width) {
+            const view = spawnGroups.viewFor(context.toolCallId);
+            const good = view.members.filter(
+              (member) =>
+                member.result &&
+                !member.result.isError &&
+                member.result.details,
+            );
+            const pending = view.members.some((member) => !member.result);
+            const heading = pending
+              ? `${theme.fg("warning", spinnerGlyph(spawnSpinnerFrame))} ${theme.fg("warning", `Running ${view.members.length} agents…`)}`
+              : `${theme.fg(good.length ? "success" : "error", good.length ? "✓" : "×")} ${good.length} background agents launched ${theme.fg("muted", "↓↓ select")}`;
+            const lines = [truncateToWidth(heading, width)];
+            view.members.forEach((member, index) => {
+              const failed =
+                member.result !== undefined &&
+                (member.result.isError || member.result.details === undefined);
+              const label =
+                member.args.name ?? member.args.description ?? "subagent";
+              const prefix = index === view.members.length - 1 ? "└ " : "├ ";
+              lines.push(
+                truncateToWidth(
+                  theme.fg(failed ? "error" : "dim", `${prefix}${label}`),
+                  width,
+                ),
+              );
+            });
+            return lines;
+          },
+          invalidate() {},
+        };
+      }
+      // The id and the resolved target live on the result row, so the call
+      // row carries only the description the model wrote.
+      const content =
+        theme.fg("toolTitle", theme.bold("subagent_spawn")) +
+        (args.description
+          ? " " + theme.fg("dim", `"${args.description}"`)
+          : "");
+      return new Text(content, 0, 0);
     },
     renderResult(result, { expanded }, theme, context) {
-      if (context.isError || !result.details) {
+      const details = result.details as SpawnDetails | undefined;
+      const view = spawnGroups.viewFor(context.toolCallId);
+      const recorded: SpawnResult = {
+        details,
+        isError: context.isError,
+        message:
+          result.content[0]?.type === "text"
+            ? result.content[0].text
+            : undefined,
+      };
+      spawnGroups.recordResult(context.toolCallId, recorded);
+      if (view.kind !== "single" && !expanded) return new Text("", 0, 0);
+      if (context.isError || !details) {
         const msg =
           result.content[0]?.type === "text"
             ? result.content[0].text
             : "spawn failed";
         return new Text(theme.fg("error", msg), 0, 0);
       }
-      const d = result.details;
+      const d = details;
       let text =
         theme.fg("success", "⏵ ") +
         theme.fg("accent", d.id) +
@@ -818,7 +1068,10 @@ export default function (pi: ExtensionAPI) {
           ` · ${delegationLabel(d.tier)} · ${d.harness} · ${d.model ?? "?"}`,
         );
       if (expanded) {
+        // The tool result text is parent-model guidance, not user-facing;
+        // expanded shows the two facts the collapsed row omits instead.
         text += "\n" + theme.fg("dim", `  cwd: ${d.cwd}`);
+        if (d.effort) text += "\n" + theme.fg("dim", `  effort: ${d.effort}`);
       } else {
         text += theme.fg(
           "dim",
@@ -839,35 +1092,40 @@ export default function (pi: ExtensionAPI) {
       }),
     }),
     async execute(_toolCallId, params, signal) {
+      if (unboundAncestry)
+        throw new Error(
+          "This child transcript has no live owning manager; delegation is disabled.",
+        );
       const manager = await getManager();
+      const owner = getOwner(manager);
       const ids = [...new Set(params.ids)];
       if (ids.length === 0)
         throw new Error("Provide at least one subagent id.");
 
-      const known = manager.view
+      const known = owner.view
         .list()
         .filter(isModelVisible)
         .map((snap) => snap.id);
       const unknown = ids.filter((id) => {
-        const snap = manager.view.get(id);
+        const snap = owner.view.get(id);
         return !snap || !isModelVisible(snap);
       });
       if (unknown.length > 0) throw unknownSubagentError(unknown, known);
 
-      const report = await runTool(getRuntime(), manager.cancel(ids), {
+      const report = await runTool(getRuntime(), owner.cancel(ids), {
         signal,
         interruptMessage: "Subagent cancellation aborted.",
       });
       // The report covers each listed run, settled or just cancelled; drop any
       // deferred copy so it is not delivered again as a follow-up.
-      consumeReturnedRuns(resultDelivery, manager.view, ids);
+      consumeReturnedRuns(resultDelivery, owner.view, ids);
 
       const lines = report.map((entry) =>
         entry.cancelled
           ? `Cancelled ${entry.id} "${entry.description}".`
           : `${entry.id} "${entry.description}" was already ${entry.status}.`,
       );
-      const sections = subagentOutputSections(manager.view, ids);
+      const sections = subagentOutputSections(owner.view, ids);
 
       return {
         content: [
@@ -926,7 +1184,12 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  interface SendRowState {
+    resultRendered?: boolean;
+  }
+
   pi.registerTool({
+    renderShell: "self",
     name: "subagent_send",
     label: "Send to Subagent",
     description: SUBAGENT_SEND_TOOL_DESCRIPTION,
@@ -939,10 +1202,15 @@ export default function (pi: ExtensionAPI) {
       }),
     }),
     async execute(_toolCallId, params, signal) {
+      if (unboundAncestry)
+        throw new Error(
+          "This child transcript has no live owning manager; delegation is disabled.",
+        );
       const manager = await getManager();
-      const snap = manager.view.get(params.id);
+      const owner = getOwner(manager);
+      const snap = owner.view.get(params.id);
       if (!snap || !isModelVisible(snap)) {
-        const known = manager.view
+        const known = owner.view
           .list()
           .filter(isModelVisible)
           .map((s) => s.id);
@@ -950,7 +1218,7 @@ export default function (pi: ExtensionAPI) {
       }
       const result = await runTool(
         getRuntime(),
-        manager.send(params.id, params.message),
+        owner.send(params.id, params.message),
         { signal, interruptMessage: "Send aborted." },
       );
       const verb = result.restarted ? "Resumed" : "Steered";
@@ -971,17 +1239,29 @@ export default function (pi: ExtensionAPI) {
         },
       };
     },
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
+      const state = context.state as SendRowState;
       return rowComponent((width) =>
-        sendCallRowText({
-          id: args.id,
-          message: args.message ?? "",
-          theme,
-          width,
-        }),
+        state.resultRendered
+          ? ""
+          : sendCallRowText({
+              id: args.id,
+              message: args.message ?? "",
+              theme,
+              width,
+            }),
       );
     },
     renderResult(result, { expanded }, theme, context) {
+      const state = context.state as SendRowState;
+      if (!state.resultRendered) {
+        // Mark the row on pi's persistent per-row state, then nudge the call
+        // slot to drop the preview on the next tick. Calling invalidate()
+        // synchronously here re-enters updateDisplay from its own result render
+        // and overflows the stack.
+        state.resultRendered = true;
+        queueMicrotask(() => context.invalidate?.());
+      }
       if (context.isError || !result.details) {
         const msg =
           result.content[0]?.type === "text"
@@ -1004,187 +1284,17 @@ export default function (pi: ExtensionAPI) {
           }),
         );
       }
-      const header =
-        theme.fg("success", "⏵ ") +
-        theme.fg("accent", d.id) +
-        theme.fg(
-          "muted",
-          ` · ${d.restarted ? "resumed" : "steered"} (run ${d.runSequence})`,
-        );
-      const body = [
-        d.restarted
-          ? theme.fg("dim", "The result arrives the same way as a spawn.")
-          : "",
-        theme.fg("muted", message),
-      ]
-        .filter(Boolean)
-        .join("\n");
-      return new Text(`${header}\n${body}`, 0, 0);
-    },
-  });
-
-  interface CheckDetails {
-    id: string;
-    description: string;
-    status: SubagentSnapshot["status"];
-    turns: number;
-    tier: DelegationTier | "explicit" | undefined;
-    runSequence: number;
-    createdAt?: number;
-    settledAt?: number;
-    runStartedAt?: number;
-    costUsd?: number;
-    tokens?: number;
-    contextWindow?: number;
-    sessionFilePath?: string;
-    summary?: string;
-    summaryCostUsd?: number;
-    summaryTokens?: number;
-  }
-
-  pi.registerTool({
-    name: "subagent_check",
-    label: "Check Subagent",
-    description: SUBAGENT_CHECK_TOOL_DESCRIPTION,
-    parameters: Type.Object({
-      id: Type.String({
-        description: SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS.id,
-      }),
-    }),
-    async execute(_toolCallId, params): Promise<AgentToolResult<CheckDetails>> {
-      const manager = await getManager();
-      const snap = manager.view.get(params.id);
-      if (!snap || !isModelVisible(snap)) {
-        const known = manager.view
-          .list()
-          .filter(isModelVisible)
-          .map((s) => s.id);
-        throw unknownSubagentError([params.id], known);
-      }
-
-      if (snap.status !== "running") {
-        // The report renders from the retained snapshot, so this is safe even
-        // after the follow-up already flushed; consuming is idempotent and
-        // prevents a second automatic delivery for a run checked on demand.
-        consumeReturnedRuns(resultDelivery, manager.view, [snap.id]);
-        // Share the automatic delivery's digest; a later check re-renders the
-        // same one from the cache instead of paying for a second call.
-        const summary = sessionContext ? await ensureSummary(snap) : undefined;
-        const handback = buildHandback({
-          snapshot: snap,
-          output: snap.finalText,
-        });
-        return {
-          content: [{ type: "text", text: handback.modelText }],
-          details: {
-            id: snap.id,
-            description: snap.description,
-            status: snap.status,
-            turns: snap.turns,
-            tier: snap.meta.tier,
-            runSequence: snap.runSequence,
-            createdAt: snap.createdAt,
-            settledAt: snap.settledAt,
-            runStartedAt: snap.runStartedAt,
-            costUsd: snap.usage.costUsd,
-            tokens: snap.usage.tokens,
-            contextWindow: snap.usage.contextWindow,
-            sessionFilePath: snap.meta.sessionFilePath,
-            summary: summary?.summary,
-            summaryCostUsd: summary?.costUsd,
-            summaryTokens: summary?.tokens,
-          },
-        };
-      }
-
-      let text = `${describeSubagent(snap)}\nTurns: ${snap.turns}`;
-      if (snap.errorText) text += `\nError: ${snap.errorText}`;
-
-      const output = latestText(snap);
-      if (output) {
-        const preview = truncateHead(output, { maxBytes: 2048, maxLines: 20 });
-        text += `\n\nLatest output:\n${preview.content}`;
-        if (preview.truncated) text += "\n[...]";
-      } else {
-        text += "\n\n(no text output yet)";
-      }
-      text += `\n\n${buildSubagentCheckRunningNote(snap)}`;
-
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          id: snap.id,
-          description: snap.description,
-          status: snap.status,
-          turns: snap.turns,
-          tier: snap.meta.tier,
-          runSequence: snap.runSequence,
-          createdAt: snap.createdAt,
-          runStartedAt: snap.runStartedAt,
-          costUsd: snap.usage.costUsd,
-          tokens: snap.usage.tokens,
-          contextWindow: snap.usage.contextWindow,
-          sessionFilePath: snap.meta.sessionFilePath,
-        },
-      };
-    },
-    renderResult(result, { expanded }, theme, context) {
-      if (context.isError || !result.details) {
-        const msg =
-          result.content[0]?.type === "text"
-            ? result.content[0].text
-            : "check failed";
-        return new Text(theme.fg("error", msg), 0, 0);
-      }
-      const d = result.details;
-      const parts = [theme.fg("accent", d.id)];
-      if (d.description) parts.push(theme.fg("muted", d.description));
-      parts.push(statusWord({ status: d.status }, theme));
-      const elapsed = elapsedOf(d);
-      if (elapsed) parts.push(theme.fg("muted", elapsed));
-      const cost = formatCost(d.costUsd);
-      if (cost) parts.push(theme.fg("muted", cost));
-      const utilization = formatContextUtilization({
-        tokens: d.tokens,
-        contextWindow: d.contextWindow,
-      });
-      if (utilization) parts.push(theme.fg("muted", utilization));
-      let text =
-        statusGlyph({ status: d.status }, theme) +
-        " " +
-        parts.join(theme.fg("dim", " · "));
-
-      if (!expanded) {
-        if (d.summary) {
-          const summaryMeta = [
-            formatCost(d.summaryCostUsd)
-              ? `summary ${formatCost(d.summaryCostUsd)}`
-              : "",
-            d.summaryTokens !== undefined ? `${d.summaryTokens} tok` : "",
-          ]
-            .filter(Boolean)
-            .join(" · ");
-          text +=
-            "\n" +
-            theme.fg("muted", d.summary) +
-            (summaryMeta ? theme.fg("dim", ` · ${summaryMeta}`) : "");
-        }
-        text += ` (${keyHint("app.tools.expand", "to expand")})`;
-        return new Text(text, 0, 0);
-      }
-
-      const contentText =
-        result.content[0]?.type === "text" ? result.content[0].text : "";
-      if (d.status === "running") {
-        // Running: the returned content is the status plus latest output.
-        return new Text(`${text}\n${contentText}`, 0, 0);
-      }
-      const { text: capped, truncated } = capChars(contentText, rawCharCap());
-      let body = `${text}\n${capped}`;
-      if (truncated) {
-        body += `\n${theme.fg("dim", truncationNotice(d.sessionFilePath))}`;
-      }
-      return new Text(body, 0, 0);
+      return new Text(
+        sendExpandedText({
+          id: d.id,
+          restarted: d.restarted,
+          runSequence: d.runSequence,
+          message,
+          theme,
+        }),
+        0,
+        0,
+      );
     },
   });
 
@@ -1194,8 +1304,13 @@ export default function (pi: ExtensionAPI) {
     description: SUBAGENT_LIST_TOOL_DESCRIPTION,
     parameters: Type.Object({}),
     async execute() {
+      if (unboundAncestry)
+        return {
+          content: [{ type: "text", text: "No subagents." }],
+          details: { subagents: [] },
+        };
       const manager = await getManager();
-      const subs = manager.view.list().filter(isModelVisible);
+      const subs = getOwner(manager).view.list().filter(isModelVisible);
       const text =
         subs.length === 0
           ? "No subagents."
@@ -1221,32 +1336,17 @@ export default function (pi: ExtensionAPI) {
     "subagent-result",
     (message, { expanded }, theme) => {
       const details = (message.details ?? {}) as Partial<SubagentResultDetails>;
-      const cancelled = details.status === "cancelled";
-      const failed = details.status === "error";
-      const icon = cancelled
-        ? theme.fg("warning", "x")
-        : failed
-          ? theme.fg("error", "x")
-          : theme.fg("success", "■");
-      const statusText = cancelled
-        ? "cancelled"
-        : failed
-          ? "failed"
-          : "finished";
-      const headerParts = [
-        theme.fg(
-          "muted",
-          ` · ${details.description ?? details.title ?? ""} · ${statusText}`,
-        ),
-      ];
       const elapsed = elapsedOf(details);
-      if (elapsed) headerParts.push(theme.fg("dim", ` · ${elapsed}`));
-      const cost = formatCost(details.costUsd);
-      if (cost) headerParts.push(theme.fg("dim", ` · ${cost}`));
-      const header =
-        `${icon} ` +
-        theme.fg("accent", theme.bold(`subagent ${details.id ?? "?"}`)) +
-        headerParts.join("");
+      const header = completionHeaderText({
+        id: details.id ?? "?",
+        description: details.description ?? details.title,
+        status: details.status ?? "done",
+        elapsed,
+        costUsd: details.costUsd,
+        errorText: details.errorText,
+        theme,
+        width: 10000,
+      });
 
       const content =
         typeof message.content === "string" ? message.content : "";
@@ -1262,26 +1362,24 @@ export default function (pi: ExtensionAPI) {
       const body = (details.fullOutput ?? contentBody).trim();
 
       if (!expanded) {
-        // The collapsed row is the header plus the digest; the raw report is
-        // only shown on expand, so long output never floods the transcript.
-        let text = header;
-        if (details.summary) {
-          const summaryMeta = [
-            formatCost(details.summaryCostUsd)
-              ? `summary ${formatCost(details.summaryCostUsd)}`
-              : "",
-            details.summaryTokens !== undefined
-              ? `${details.summaryTokens} tok`
-              : "",
-          ]
-            .filter(Boolean)
-            .join(" · ");
-          text +=
-            "\n" +
-            theme.fg("muted", details.summary) +
-            (summaryMeta ? theme.fg("dim", ` · ${summaryMeta}`) : "");
-        }
-        return new Text(text, 0, 0);
+        return {
+          render: (width: number) => [
+            completionHeaderText({
+              id: details.id ?? "?",
+              description: details.description ?? details.title,
+              status: details.status ?? "done",
+              elapsed,
+              costUsd: details.costUsd,
+              errorText: details.errorText,
+              theme,
+              width,
+            }),
+            ...(details.summary
+              ? [digestLineText(details.summary, theme, width)]
+              : []),
+          ],
+          invalidate: () => {},
+        };
       }
 
       // Expanded: the raw report lives in details so it never enters the model
@@ -1363,7 +1461,15 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    if (unboundAncestry) {
+      ctx.ui.notify(
+        "This child transcript has no live owning manager; delegation is disabled.",
+        "error",
+      );
+      return;
+    }
     const manager = await getManager();
+    const owner = getOwner(manager);
     const askPrompt = async () =>
       (await ctx.ui.input("by the way", "Ask a one-off question…"))?.trim() ??
       "";
@@ -1375,11 +1481,11 @@ export default function (pi: ExtensionAPI) {
     let askNext = false;
     while (true) {
       if (!prompt) {
-        const hasHistory = manager.view
+        const hasHistory = owner.view
           .list()
           .some((snap) => snap.origin === "btw");
         if (hasHistory && !askNext) {
-          const action = await openBtwPanel(ctx, manager.view);
+          const action = await openBtwPanel(ctx, owner.view);
           if (action === null) return;
         }
         prompt = await askPrompt();
@@ -1406,7 +1512,7 @@ export default function (pi: ExtensionAPI) {
       try {
         await runTool(
           getRuntime(),
-          manager.spawn("pi", {
+          owner.spawn("pi", {
             origin: "btw",
             // The child has no tools (see backends/pi.ts noTools); the prefix
             // keeps it from reasoning about tool use it cannot perform.
@@ -1437,7 +1543,7 @@ export default function (pi: ExtensionAPI) {
 
       // Reopen the panel on the new aside (newest is selected by default);
       // `n` loops back for another question.
-      const action = await openBtwPanel(ctx, manager.view);
+      const action = await openBtwPanel(ctx, getOwner(manager).view);
       if (action !== "new") return;
       askNext = true;
     }
@@ -1460,6 +1566,13 @@ export default function (pi: ExtensionAPI) {
           );
         return;
       }
+      if (unboundAncestry) {
+        ctx.ui.notify(
+          "This child transcript has no live owning manager; takeover is unavailable.",
+          "error",
+        );
+        return;
+      }
       const manager = await getManager();
       if (manager.view.list().filter(isModelVisible).length === 0) {
         ctx.ui.notify(
@@ -1472,97 +1585,29 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("subagent-model", {
+  pi.registerCommand("subagents-menu", {
     description:
-      "Choose the default model and effort for each subagent delegation tier",
+      "Configure subagent tiers, cost ceiling, nesting, and summaries",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") {
         if (ctx.hasUI)
           ctx.ui.notify(
-            "Subagent model selection is only available in the TUI",
+            "/subagents-menu is only available in the TUI.",
             "error",
           );
         return;
       }
-
-      const result = await pickTierConfig({
-        config: loadDelegationConfig(),
+      await runSubagentsMenu({
         cwd: ctx.cwd,
         models: ctx.modelRegistry.getAvailable(),
-        ceiling: costCeiling(),
+        effectiveCeiling: costCeiling,
         ui: {
           select: (title, options) => ctx.ui.select(title, [...options]),
+          input: (title, placeholder) => ctx.ui.input(title, placeholder),
           pickEffort: (options, current) => pickEffort(ctx, options, current),
           notify: (message, type) => ctx.ui.notify(message, type),
         },
       });
-      if (!result) return;
-
-      try {
-        await saveDelegationConfig(result.config);
-      } catch {
-        ctx.ui.notify("Could not save the subagent model defaults.", "error");
-        return;
-      }
-
-      ctx.ui.notify(
-        `${result.tier} → ${tierTargetLabel(result.config, result.tier)}`,
-        "info",
-      );
-    },
-  });
-
-  pi.registerCommand("subagent-cost", {
-    description:
-      "Set the output-price ceiling ($/Mtok) for models subagents pick themselves",
-    handler: async (_args, ctx) => {
-      if (ctx.mode !== "tui") {
-        if (ctx.hasUI)
-          ctx.ui.notify(
-            "Subagent cost ceiling selection is only available in the TUI",
-            "error",
-          );
-        return;
-      }
-
-      const current = costCeiling();
-      const raw = await ctx.ui.input(
-        "Subagent cost ceiling ($/Mtok output, off to disable)",
-        current === null ? "off" : `$${current}`,
-      );
-      if (raw === undefined) return;
-
-      const trimmed = raw.trim().replace(/^\$/, "").toLowerCase();
-      if (!trimmed) return;
-
-      let ceiling: number | null;
-      if (trimmed === "off") {
-        ceiling = null;
-      } else {
-        const parsed = Number.parseFloat(trimmed);
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-          ctx.ui.notify('Enter a positive dollar amount or "off".', "error");
-          return;
-        }
-        ceiling = parsed;
-      }
-
-      try {
-        await saveDelegationConfig({
-          ...loadDelegationConfig(),
-          costCeiling: ceiling,
-        });
-      } catch {
-        ctx.ui.notify("Could not save the subagent cost ceiling.", "error");
-        return;
-      }
-
-      ctx.ui.notify(
-        ceiling === null
-          ? "Subagent cost ceiling: off"
-          : `Subagent cost ceiling: $${ceiling}/Mtok output`,
-        "info",
-      );
     },
   });
 }

@@ -17,7 +17,13 @@
  */
 
 import type { TranscriptItem, TranscriptPart } from "../domain.ts";
-import { isRecord, previewOf, safeJsonPreview, textOf } from "./shared.ts";
+import {
+  isRecord,
+  previewOf,
+  safeJsonArgs,
+  safeJsonPreview,
+  textOf,
+} from "./shared.ts";
 
 export interface ClaudeParser {
   /** Parse one project-file record into transcript items (usually 0 or 1). */
@@ -70,6 +76,7 @@ function parseAssistant(
         toolId: block.id,
         name: block.name,
         argsPreview: safeJsonPreview(block.input),
+        args: safeJsonArgs(block.input),
       });
     }
   }

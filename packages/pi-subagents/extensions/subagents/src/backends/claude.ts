@@ -167,7 +167,7 @@ function boundedError(error: unknown) {
 
 /**
  * Resolve the alias to run on. No hint uses the configured default
- * (/subagent-model). An agent choosing for itself is held to the cheap tier;
+ * (/subagents-menu). An agent choosing for itself is held to the cheap tier;
  * a user aside (/btw) may pick anything.
  */
 function resolveClaudeModel(task: SpawnTask) {
@@ -183,7 +183,7 @@ function resolveClaudeModel(task: SpawnTask) {
   throw new Error(
     `Model "${task.model}" is not available to subagents on the claude harness. ` +
       `Use ${CLAUDE_AGENT_SELECTABLE_MODELS.join(" or ")}, or omit "model" for the ` +
-      `configured default ("${configured.model}"). Ask the user to run /subagent-model to change it.`,
+      `configured default ("${configured.model}"). Ask the user to run /subagents-menu to change it.`,
   );
 }
 

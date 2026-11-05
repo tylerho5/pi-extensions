@@ -100,8 +100,8 @@ export function shouldSummarize(options: {
 }
 
 /** The one user message: the instruction, then the report as data. */
-export function buildSummarizeRequest(report: string) {
-  return `${SUMMARY_PROMPT}\n\n${report}`;
+export function buildSummarizeRequest(report: string, prompt = SUMMARY_PROMPT) {
+  return `${prompt}\n\n${report}`;
 }
 
 function assistantText(content: AssistantMessage["content"]) {
@@ -143,8 +143,11 @@ export async function summarizeReport(options: {
   /** Head-only cap on the report text fed to the model. */
   inputCharCap: number;
   signal?: AbortSignal;
+  /** Instruction override; the progress line reuses this cheap pass. */
+  prompt?: string;
+  maxTokens?: number;
 }): Promise<SummarizeResult | undefined> {
-  const { deps, target, report, inputCharCap, signal } = options;
+  const { deps, target, report, inputCharCap, signal, prompt } = options;
   try {
     const model = deps.findModel(target.provider ?? "", target.model);
     if (!model) return undefined;
@@ -160,6 +163,7 @@ export async function summarizeReport(options: {
             role: "user",
             content: buildSummarizeRequest(
               report.slice(0, Math.max(0, inputCharCap)),
+              prompt,
             ),
             timestamp: Date.now(),
           },
@@ -170,7 +174,7 @@ export async function summarizeReport(options: {
         env: auth.env,
         headers: auth.headers,
         reasoning: clampToNoThinking(model),
-        maxTokens: SUMMARY_MAX_TOKENS,
+        maxTokens: options.maxTokens ?? SUMMARY_MAX_TOKENS,
         maxRetries: 1,
         signal,
         timeoutMs: SUMMARY_TIMEOUT_MS,

@@ -12,7 +12,13 @@
  */
 
 import type { TranscriptItem, TranscriptPart } from "../domain.ts";
-import { isRecord, previewOf, safeJsonPreview, textOf } from "./shared.ts";
+import {
+  isRecord,
+  previewOf,
+  safeJsonArgs,
+  safeJsonPreview,
+  textOf,
+} from "./shared.ts";
 
 /**
  * Normalize one pi session-file record. Returns a transcript item, or null
@@ -77,6 +83,7 @@ function assistantParts(content: unknown): TranscriptPart[] {
         toolId: part.id,
         name: part.name,
         argsPreview: safeJsonPreview(part.arguments),
+        args: safeJsonArgs(part.arguments),
       });
     }
   }

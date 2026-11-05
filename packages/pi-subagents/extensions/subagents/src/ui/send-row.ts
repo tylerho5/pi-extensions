@@ -16,10 +16,16 @@ export function firstLine(text: string): string {
   return "";
 }
 
-/** A single-line row that truncates against the width it is rendered at. */
+/**
+ * A single-line row that truncates against the width it is rendered at. An
+ * empty build renders no line, matching the Text component's hidden-row case.
+ */
 export function rowComponent(build: (width: number) => string): Component {
   return {
-    render: (width: number) => [build(width)],
+    render: (width: number) => {
+      const line = build(width);
+      return line ? [line] : [];
+    },
     invalidate: () => {},
   };
 }
@@ -50,12 +56,37 @@ export function sendRowText(options: {
   theme: Theme;
   width: number;
 }): string {
-  const { id, restarted, runSequence, message, theme, width } = options;
+  const { id, restarted, runSequence, theme, width } = options;
   const verb = restarted ? "resumed" : "steered";
   const text =
     theme.fg("success", "⏵ ") +
     theme.fg("accent", id) +
-    theme.fg("muted", ` · ${verb} (run ${runSequence})`) +
-    previewSuffix(message, theme);
+    theme.fg("muted", ` · ${verb} (run ${runSequence})`);
   return truncateToWidth(text, width);
+}
+
+export function sendExpandedText(options: {
+  id: string;
+  restarted: boolean;
+  runSequence: number;
+  message: string;
+  theme: Theme;
+}) {
+  const { id, restarted, runSequence, message, theme } = options;
+  const header =
+    theme.fg("success", "⏵ ") +
+    theme.fg("accent", id) +
+    theme.fg(
+      "muted",
+      ` · ${restarted ? "resumed" : "steered"} (run ${runSequence})`,
+    );
+  return [
+    header,
+    restarted
+      ? theme.fg("dim", "The result arrives the same way as a spawn.")
+      : "",
+    theme.fg("muted", message),
+  ]
+    .filter(Boolean)
+    .join("\n");
 }

@@ -42,6 +42,13 @@ import { SendError, SpawnError } from "../domain.ts";
 import { BTW_CONTEXT_END, BTW_CONTEXT_START } from "../by-the-way.ts";
 import { addChildCost } from "../../../shared/child-cost.ts";
 import { childToolPolicy } from "../../../shared/child-session.ts";
+import {
+  createNativeDelegationBinding,
+  registerNativeDelegation,
+  serializeAncestry,
+  childDelegationEnabled,
+  type NativeDelegationBinding,
+} from "../delegation.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 import {
   affordableModels,
@@ -55,8 +62,8 @@ import {
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 /** Child tool options applied to every pi subagent session (canonical policy). */
-export function piChildToolOptions() {
-  return childToolPolicy();
+export function piChildToolOptions(delegation?: "enabled" | "leaf") {
+  return childToolPolicy({ delegation });
 }
 
 // --- Model + effort resolution -----------------------------------------------
@@ -85,7 +92,7 @@ function resolvePiModel(
     if (found) return found;
     throw new Error(
       target.source.kind === "tier"
-        ? `Subagent tier "${target.source.tier}" targets "${target.provider}/${target.model}", which is not available. Run /subagent-model to pick another.`
+        ? `Subagent tier "${target.source.tier}" targets "${target.provider}/${target.model}", which is not available. Run /subagents-menu to pick another.`
         : `Unknown model "${target.provider}/${target.model}".`,
     );
   }
@@ -393,6 +400,8 @@ const makePiSession = (
         : [];
     const seedSet = new Set<object>(seedMessages);
 
+    let unregisterBinding: (() => void) | undefined;
+    let nativeBinding: NativeDelegationBinding | undefined;
     const session = yield* Effect.tryPromise({
       try: async () => {
         const { loader, settingsManager } = await createChildResources(
@@ -411,6 +420,25 @@ const makePiSession = (
           // Naming is best-effort.
         }
         seedInheritedBtwContext(sessionManager, seedMessages);
+        if (task.ancestry) {
+          sessionManager.appendCustomEntry(
+            "subagent-ancestry",
+            serializeAncestry(task.ancestry),
+          );
+        }
+        if (task.origin !== "btw" && task.ancestry && task.parent.delegation) {
+          nativeBinding = createNativeDelegationBinding(
+            task.ancestry,
+            task.parent.delegation
+              .runtime as import("../runtime.ts").SubagentRuntime,
+            task.parent.delegation
+              .owner as import("../manager.ts").SubagentOwner,
+          );
+          unregisterBinding = registerNativeDelegation(
+            sessionManager.getSessionId(),
+            nativeBinding,
+          );
+        }
         const { session } = await createAgentSession({
           cwd: task.cwd,
           sessionManager,
@@ -418,7 +446,13 @@ const makePiSession = (
           resourceLoader: loader,
           model,
           thinkingLevel,
-          ...piChildToolOptions(),
+          ...piChildToolOptions(
+            task.ancestry && task.origin !== "btw"
+              ? childDelegationEnabled(task.ancestry)
+                ? "enabled"
+                : "leaf"
+              : undefined,
+          ),
           // btw asides are one-off questions answered from context: the child
           // gets no tools at all, so it cannot wander into tool use.
           noTools: task.origin === "btw" ? "all" : undefined,
@@ -430,11 +464,19 @@ const makePiSession = (
           await session.bindExtensions({ mode: "print" });
         } catch (error) {
           await shutdownAndDisposeChildSession(session);
+          unregisterBinding?.();
+          unregisterBinding = undefined;
+          nativeBinding = undefined;
           throw error;
         }
         return session;
       },
-      catch: (error) => new SpawnError({ message: boundedError(error) }),
+      catch: (error) => {
+        unregisterBinding?.();
+        unregisterBinding = undefined;
+        nativeBinding = undefined;
+        return new SpawnError({ message: boundedError(error) });
+      },
     });
 
     const state = {
@@ -444,14 +486,36 @@ const makePiSession = (
       /** One terminal event per run: lifecycle, prompt-rejection, and abort
        * fallbacks can all race to settle; the first wins. */
       settled: false,
+      settleRequested: false,
       /** Cumulative spend across the child's whole lifetime (idle restarts included). */
       costUsd: 0,
     };
 
+    const gate = nativeBinding?.completion;
+    let unsubscribe: () => void = () => {};
+    let unsubscribeGate: () => void = () => {};
     const events = yield* Queue.make<SubagentEvent, Cause.Done>();
     const emit = (event: SubagentEvent) => {
       Queue.offerUnsafe(events, event);
     };
+    yield* Effect.addFinalizer(() =>
+      Effect.promise(async () => {
+        state.closed = true;
+        gate?.close();
+        unsubscribeGate();
+        unregisterBinding?.();
+        unregisterBinding = undefined;
+        unsubscribe();
+        try {
+          session.clearQueue();
+        } catch {
+          /* Continue with abort/dispose. */
+        }
+        await waitBounded(session.abort(), CHILD_SHUTDOWN_TIMEOUT_MS);
+        await shutdownAndDisposeChildSession(session);
+        Queue.endUnsafe(events);
+      }),
+    );
 
     const toolTimeout = createToolCallTimeoutGuard();
     toolTimeout.apply(session);
@@ -494,6 +558,12 @@ const makePiSession = (
       });
     };
 
+    const attemptSettle = () => {
+      if (!state.settleRequested || state.closed || state.settled) return;
+      if (!session.isIdle || (gate && !gate.canSettle())) return;
+      settle();
+    };
+
     const settle = () => {
       if (state.settled) return;
       state.settled = true;
@@ -524,14 +594,32 @@ const makePiSession = (
       }
       emit({
         _tag: "RunSettled",
-        outcome: { _tag: "Completed", finalText: finalOutput(session) },
+        outcome: {
+          _tag: "Completed",
+          finalText: finalOutput(session, seedSet),
+        },
       });
     };
 
     const handleEvent = (event: AgentSessionEvent) => {
       if (state.closed) return;
       switch (event.type) {
+        case "message_start": {
+          const message = event.message as {
+            role?: string;
+            customType?: string;
+          };
+          if (
+            message.role === "custom" &&
+            message.customType === "subagent-result"
+          ) {
+            gate?.setModelActive(true);
+            attemptSettle();
+          }
+          break;
+        }
         case "agent_start":
+          gate?.setModelActive(true);
           // Extensions may register tools between runs; guard new ones too.
           toolTimeout.apply(session);
           state.settled = false;
@@ -614,31 +702,27 @@ const makePiSession = (
           });
           break;
         case "agent_settled":
-          settle();
+          state.settleRequested = true;
+          gate?.setModelActive(false);
+          if (
+            state.runError ||
+            lastAssistantMessage(session, seedSet)?.stopReason === "error" ||
+            lastAssistantMessage(session, seedSet)?.stopReason === "aborted"
+          )
+            settle();
+          else attemptSettle();
           break;
       }
     };
-    const unsubscribe = session.subscribe(handleEvent);
-
-    yield* Effect.addFinalizer(() =>
-      Effect.promise(async () => {
-        state.closed = true;
-        unsubscribe();
-        try {
-          session.clearQueue();
-        } catch {
-          // Continue with abort/dispose.
-        }
-        await waitBounded(session.abort(), CHILD_SHUTDOWN_TIMEOUT_MS);
-        await shutdownAndDisposeChildSession(session);
-        Queue.endUnsafe(events);
-      }),
-    );
+    unsubscribe = session.subscribe(handleEvent);
+    unsubscribeGate = gate?.subscribe(attemptSettle) ?? (() => {});
 
     /** Start a fresh run (v1 manager.run): fire-and-forget, errors -> events. */
     const startRun = (text: string) => {
       state.runError = undefined;
+      state.settleRequested = false;
       state.settled = false;
+      gate?.setModelActive(true);
       emit({ _tag: "RunStarted" });
       void session.prompt(text).catch((error) => {
         state.runError = boundedError(error);

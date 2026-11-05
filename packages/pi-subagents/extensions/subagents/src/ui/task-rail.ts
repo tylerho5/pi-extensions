@@ -1,16 +1,28 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatElapsed, type SubagentSnapshot } from "../domain.ts";
-import { formatContextUtilization, formatCost } from "../format.ts";
+import { formatElapsedBetween, type SubagentSnapshot } from "../domain.ts";
+import { formatCompactTokens, formatCost } from "../format.ts";
 import type { SubagentReadModel } from "../manager.ts";
+import { spinnerGlyph } from "./activity-row.ts";
+import {
+  nextExpiry,
+  PANEL_MAX_ROWS,
+  panelRows,
+  panelWindow,
+  type PanelRow,
+} from "./panel-model.ts";
 
-/** Window for the collapsed down double-tap that opens the rail. */
+/** Window for the down double-tap that focuses the panel. */
 export const DOUBLE_TAP_MS = 500;
 
+/**
+ * Focus and selection for the agent panel under the prompt. Membership comes
+ * from `panelRows`; this only tracks where the user is in it.
+ */
 export class TaskRailController {
   expanded = false;
-  showFinished = false;
   selectedId: string | undefined;
+  private selectedIndex = 0;
   private scrollTop = 0;
   private lastDownTapAt: number | undefined;
   private requestRender: (() => void) | undefined;
@@ -22,187 +34,171 @@ export class TaskRailController {
   reset() {
     this.expanded = false;
     this.selectedId = undefined;
+    this.selectedIndex = 0;
     this.scrollTop = 0;
     this.lastDownTapAt = undefined;
     this.requestRender?.();
   }
 
   /**
-   * A down tap while the rail is collapsed. A lone tap returns false so the
-   * key reaches normal editor navigation; a second tap inside DOUBLE_TAP_MS
-   * opens the rail and returns true so the caller consumes it.
+   * A down tap while unfocused. A lone tap returns false so the key reaches
+   * the editor; a second tap inside DOUBLE_TAP_MS focuses the panel.
    */
-  handleCollapsedDown(now: number): boolean {
+  handleCollapsedDown(now: number, rows: ReadonlyArray<PanelRow>): boolean {
     const previous = this.lastDownTapAt;
     this.lastDownTapAt = now;
     if (previous === undefined || now - previous > DOUBLE_TAP_MS) return false;
     this.lastDownTapAt = undefined;
-    this.toggleExpanded();
+    if (rows.length === 0) return false;
+    this.expanded = true;
+    this.selectedId = rows[0]!.snap.id;
+    this.selectedIndex = 0;
+    this.requestRender?.();
     return true;
   }
 
-  /** Drop a pending first tap when the gesture no longer applies. */
   clearTap() {
     this.lastDownTapAt = undefined;
   }
 
-  /**
-   * Reveal finished subagents alongside running ones. Used by the keyboard
-   * handler when the user navigates to the bottom of the running list, or
-   * when opening the rail with no running subagents to show.
-   */
-  revealFinished() {
-    if (this.showFinished) return false;
-    this.showFinished = true;
-    // Don't reset `selectedId` here: the next render will reconcile against
-    // the new visible list and preserve a selection that is still in scope.
-    this.requestRender?.();
-    return true;
+  /** Reconcile against the current rows; a focused panel that emptied closes. */
+  window(rows: ReadonlyArray<PanelRow>, max = PANEL_MAX_ROWS) {
+    const view = panelWindow(
+      rows,
+      {
+        selectedId: this.expanded ? this.selectedId : undefined,
+        selectedIndex: this.selectedIndex,
+        scrollTop: this.scrollTop,
+      },
+      max,
+    );
+    this.scrollTop = view.scrollTop;
+    if (this.expanded) {
+      this.selectedId = view.selectedId;
+      if (view.selectedId === undefined) this.expanded = false;
+      else
+        this.selectedIndex = rows.findIndex(
+          (row) => row.snap.id === view.selectedId,
+        );
+    }
+    return view;
   }
 
-  toggleExpanded() {
-    this.expanded = !this.expanded;
-    this.requestRender?.();
-  }
-
-  reconcile(visible: ReadonlyArray<SubagentSnapshot>) {
-    if (visible.some((snap) => snap.id === this.selectedId)) return;
-    this.selectedId = visible[0]?.id;
-  }
-
-  /**
-   * First index of the rendered window: keeps the selection on screen by
-   * scrolling only when it would leave the `rows`-sized window, and clamps
-   * against a list that shrank since the last render.
-   */
-  windowOffset(visible: ReadonlyArray<SubagentSnapshot>, rows: number) {
-    this.reconcile(visible);
-    const index = visible.findIndex((snap) => snap.id === this.selectedId);
-    if (index < 0) return 0;
-    if (index < this.scrollTop) this.scrollTop = index;
-    if (index >= this.scrollTop + rows) this.scrollTop = index - rows + 1;
-    const maxOffset = Math.max(0, visible.length - rows);
-    this.scrollTop = Math.max(0, Math.min(this.scrollTop, maxOffset));
-    return this.scrollTop;
-  }
-
-  /**
-   * Move the selection by `delta` without wrapping. Returns:
-   * - `"moved"` when the selection changed,
-   * - `"atTop"` when `delta` was negative and the selection was already at
-   *   the first item (callers close the rail in response),
-   * - `"atBottom"` when `delta` was positive and the selection was already
-   *   at the last item (callers may reveal finished subagents).
-   */
+  /** Move without wrapping; "atTop" lets the caller hand focus back. */
   move(
-    visible: ReadonlyArray<SubagentSnapshot>,
+    rows: ReadonlyArray<PanelRow>,
     delta: number,
   ): "moved" | "atTop" | "atBottom" {
-    this.reconcile(visible);
-    if (visible.length === 0) return "atBottom";
-    const index = Math.max(
-      0,
-      visible.findIndex((snap) => snap.id === this.selectedId),
-    );
+    this.window(rows);
+    if (rows.length === 0) return "atBottom";
+    const index = Math.max(0, this.selectedIndex);
     if (delta < 0 && index === 0) return "atTop";
-    if (delta > 0 && index === visible.length - 1) return "atBottom";
-    this.selectedId = visible[index + delta]?.id;
+    if (delta > 0 && index === rows.length - 1) return "atBottom";
+    this.selectedIndex = index + delta;
+    this.selectedId = rows[this.selectedIndex]?.snap.id;
     this.requestRender?.();
     return "moved";
   }
 }
 
-/** Rows the expanded rail can occupy; longer lists scroll with the selection. */
-const MAX_RAIL_ROWS = 8;
-
-/** Running rows the auto (unexpanded) rail shows before a `… N more` line. */
-const MAX_AUTO_ROWS = 4;
-
-/** Braille spinner frames; the rail's ticker advances one per second. */
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⢼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-function active(snap: SubagentSnapshot) {
-  return snap.status === "running";
+export function railRows(view: SubagentReadModel, now = Date.now()) {
+  return panelRows(view.list(), now);
 }
 
-export function visibleRailSubagents(
-  view: SubagentReadModel,
-  controller: TaskRailController,
-) {
-  const all = view.list().filter((snap) => snap.origin === "model");
-  const running = all.filter(active);
-  return controller.showFinished
-    ? [...running, ...all.filter((snap) => !active(snap))]
-    : running;
-}
-
-function summary(view: SubagentReadModel) {
-  const all = view.list().filter((snap) => snap.origin === "model");
-  const running = all.filter(active).length;
-  const finished = all.length - running;
-  return { running, finished };
-}
-
-function stateText(snap: SubagentSnapshot, theme: Theme) {
+function glyph(snap: SubagentSnapshot, theme: Theme, frame: number) {
   switch (snap.status) {
     case "running":
-      return theme.fg("warning", "running");
+      return theme.fg("warning", spinnerGlyph(frame));
     case "done":
-      return theme.fg("success", "done");
+      return theme.fg("success", "✔");
+    case "error":
+      return theme.fg("error", "✘");
     case "cancelled":
-      return theme.fg("warning", "cancelled");
-    default:
-      return theme.fg("error", "failed");
+      return theme.fg("warning", "✘");
   }
+}
+
+function activity(
+  snap: SubagentSnapshot,
+  progress: string | undefined,
+  theme: Theme,
+  selected: boolean,
+) {
+  if (snap.status === "error")
+    return theme.fg(
+      "error",
+      `Failed: ${(snap.errorText ?? "error").split("\n")[0]}`,
+    );
+  if (snap.status === "cancelled") return theme.fg("warning", "Stopped");
+  const text = progress || snap.description;
+  return selected ? theme.fg("text", text) : theme.fg("dim", text);
+}
+
+function stats(snap: SubagentSnapshot, theme: Theme, now: number) {
+  const end = snap.status === "running" ? now : (snap.settledAt ?? now);
+  const parts = [
+    formatElapsedBetween(snap.runStartedAt ?? snap.createdAt, end),
+  ];
+  if (snap.usage.tokens && snap.usage.tokens > 0)
+    parts.push(`↓ ${formatCompactTokens(snap.usage.tokens)} tokens`);
+  const cost = formatCost(snap.usage.costUsd);
+  if (cost) parts.push(cost);
+  const queued = snap.queued.length;
+  return (
+    theme.fg("dim", parts.join(" · ")) +
+    (queued > 0 ? theme.fg("warning", ` · ${queued} queued`) : "")
+  );
+}
+
+function treePrefix(row: PanelRow, theme: Theme) {
+  if (row.depth === 0) return "";
+  return theme.fg(
+    "dim",
+    "  ".repeat(row.depth - 1) + (row.lastSibling ? "└ " : "├ "),
+  );
 }
 
 /**
- * One auto row: spinner, description, then cost, elapsed, and ctx% as dim
- * segments. Under width pressure the segments drop in the order cost, ctx%,
- * elapsed; after that the description truncates but keeps an 8-column floor.
+ * One row: pointer, tree connector, status glyph, name column, activity
+ * (progress line, else description), and right-aligned stats. Under width
+ * pressure the activity truncates first, then the stats.
  */
-function autoRow(
-  snap: SubagentSnapshot,
-  theme: Theme,
-  width: number,
-  frame: string,
-) {
-  const segments = [
-    { key: "cost", text: formatCost(snap.usage.costUsd) },
-    { key: "ctx", text: formatContextUtilization(snap.usage) },
-    { key: "elapsed", text: formatElapsed(snap) },
-  ].filter((segment) => segment.text.length > 0);
-  const prefix = theme.fg("warning", frame) + " ";
-  let kept = segments;
-  const compose = (parts: typeof segments) =>
-    prefix +
-    theme.fg("text", snap.description) +
-    (parts.length
-      ? theme.fg("dim", " · ") +
-        parts
-          .map((segment) => theme.fg("dim", segment.text))
-          .join(theme.fg("dim", " · "))
-      : "");
-  for (const key of ["cost", "ctx", "elapsed"]) {
-    const row = compose(kept);
-    if (visibleWidth(row) <= width) return row;
-    kept = kept.filter((segment) => segment.key !== key);
-  }
-  const suffix = kept.length
-    ? theme.fg("dim", " · ") +
-      kept
-        .map((segment) => theme.fg("dim", segment.text))
-        .join(theme.fg("dim", " · "))
-    : "";
-  const available = Math.max(
-    8,
-    width - visibleWidth(prefix) - visibleWidth(suffix),
+function panelLine(options: {
+  row: PanelRow;
+  nameWidth: number;
+  selected: boolean;
+  progress: string | undefined;
+  theme: Theme;
+  width: number;
+  frame: number;
+  now: number;
+}) {
+  const { row, nameWidth, selected, progress, theme, width, frame, now } =
+    options;
+  const snap = row.snap;
+  const pointer = selected ? theme.fg("accent", "❯ ") : "  ";
+  const prefix =
+    pointer + treePrefix(row, theme) + glyph(snap, theme, frame) + " ";
+  const room = Math.max(4, nameWidth - visibleWidth(treePrefix(row, theme)));
+  const name = truncateToWidth(snap.id, room);
+  const nameCell =
+    (selected ? theme.fg("accent", name) : theme.fg("text", name)) +
+    " ".repeat(Math.max(0, room - visibleWidth(name)));
+  const right = truncateToWidth(
+    stats(snap, theme, now),
+    Math.max(0, width - 12),
   );
-  const description = truncateToWidth(
-    theme.fg("text", snap.description),
-    available,
+  const left = prefix + nameCell + "  ";
+  const available = width - visibleWidth(left) - visibleWidth(right) - 1;
+  const act =
+    available > 0
+      ? truncateToWidth(activity(snap, progress, theme, selected), available)
+      : "";
+  const gap = Math.max(
+    1,
+    width - visibleWidth(left) - visibleWidth(act) - visibleWidth(right),
   );
-  return truncateToWidth(prefix + description + suffix, width);
+  return truncateToWidth(left + act + " ".repeat(gap) + right, width);
 }
 
 export function createTaskRail(
@@ -210,104 +206,100 @@ export function createTaskRail(
   controller: TaskRailController,
   theme: Theme,
   requestRender: () => void,
+  progressFor: (id: string) => string | undefined = () => undefined,
+  clock: () => number = Date.now,
 ) {
   controller.attach(requestRender);
-  let spinnerFrame = 0;
+  let frame = 0;
   let ticker: ReturnType<typeof setInterval> | undefined;
-  const anyRunning = () => summary(view).running > 0;
-  // The ticker exists only while something runs: it animates the auto rows'
-  // spinner, so an idle rail pays nothing.
-  const syncTicker = () => {
-    if (anyRunning()) {
+  let expiry: ReturnType<typeof setTimeout> | undefined;
+  // The spinner ticks only while something runs; a lingering row arms one
+  // timer for its expiry, so an idle panel costs nothing.
+  const sync = () => {
+    const snaps = view.list();
+    const running = snaps.some(
+      (snap) => snap.origin === "model" && snap.status === "running",
+    );
+    if (running) {
       ticker ??= setInterval(() => {
-        spinnerFrame += 1;
+        frame += 1;
         requestRender();
       }, 1000);
-      return;
-    }
-    if (ticker !== undefined) {
+    } else if (ticker !== undefined) {
       clearInterval(ticker);
       ticker = undefined;
     }
+    if (expiry !== undefined) clearTimeout(expiry);
+    expiry = undefined;
+    const now = clock();
+    const at = nextExpiry(snaps, now);
+    if (at !== undefined)
+      expiry = setTimeout(() => {
+        expiry = undefined;
+        sync();
+        requestRender();
+      }, at - now);
+    expiry?.unref?.();
   };
-  syncTicker();
+  sync();
   const unsubscribe = view.subscribe(() => {
-    syncTicker();
+    sync();
     requestRender();
   });
 
   return {
     dispose() {
       if (ticker !== undefined) clearInterval(ticker);
+      if (expiry !== undefined) clearTimeout(expiry);
       ticker = undefined;
+      expiry = undefined;
       unsubscribe();
     },
     invalidate() {},
     render(width: number) {
-      const { running, finished } = summary(view);
-      const selectable = controller.expanded;
-      // Collapsed and idle: the rail is fully hidden. The down double-tap
-      // still expands for browsing finished agents.
-      if (!selectable && running === 0) return [];
-
-      const header = controller.showFinished ? "Subagents · all" : "Subagents";
-      const hint = selectable ? "enter view" : "↓↓ select";
-      // Segments joined with dim separators (rather than one muted wrap) so
-      // the colored count squares don't reset the surrounding styling.
-      const segments = [
-        theme.fg("accent", "↗ ") + theme.fg("toolTitle", header),
-      ];
-      if (running > 0)
-        segments.push(theme.fg("success", `■ ${running} running`));
-      if (finished > 0)
-        segments.push(
-          theme.fg("warning", `■ ${finished} finished`) +
-            (controller.showFinished ? "" : theme.fg("dim", " hidden")),
+      const rows = railRows(view, clock());
+      const window = controller.window(rows);
+      if (rows.length === 0) return [];
+      const nameWidth = Math.min(
+        28,
+        Math.max(
+          4,
+          ...rows.map(
+            (row) => row.snap.id.length + (row.depth > 0 ? row.depth * 2 : 0),
+          ),
+        ),
+      );
+      const lines: string[] = [];
+      if (window.above > 0)
+        lines.push(theme.fg("dim", `  ↑ ${window.above} more`));
+      for (const row of window.rows)
+        lines.push(
+          panelLine({
+            row,
+            nameWidth,
+            selected: controller.expanded && row.snap.id === window.selectedId,
+            progress: progressFor(row.snap.id),
+            theme,
+            width,
+            frame,
+            now: clock(),
+          }),
         );
-      segments.push(theme.fg("muted", hint));
-      const lines = [
-        truncateToWidth(segments.join(theme.fg("dim", " · ")), width),
-      ];
-
-      if (!selectable) {
-        // Auto state: running model-origin agents only, no selection state.
-        const rows = view
-          .list()
-          .filter((snap) => snap.origin === "model" && active(snap))
-          .slice(0, MAX_AUTO_ROWS);
-        const frame = SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!;
-        for (const snap of rows) lines.push(autoRow(snap, theme, width, frame));
-        const more = running - rows.length;
-        if (more > 0) lines.push(theme.fg("dim", `  … ${more} more`));
-        return lines;
-      }
-
-      const visible = visibleRailSubagents(view, controller);
-      const start = controller.windowOffset(visible, MAX_RAIL_ROWS);
-      const windowed = visible.slice(start, start + MAX_RAIL_ROWS);
-      for (const snap of windowed) {
-        const selected = snap.id === controller.selectedId;
-        const marker = selected ? theme.fg("accent", "❯") : " ";
-        const label = selected
-          ? theme.fg("accent", snap.description)
-          : theme.fg("text", snap.description);
-        const right =
-          theme.fg("muted", ` · ${formatElapsed(snap)} · `) +
-          stateText(snap, theme);
-        const left = `${marker} ${label}${theme.fg("dim", ` ${snap.id}`)}`;
-        const available = Math.max(1, width - visibleWidth(right));
-        lines.push(truncateToWidth(left, available) + right);
-      }
-      if (visible.length === 0)
-        lines.push(theme.fg("dim", "  no running subagents"));
-      const above = start;
-      const below = visible.length - start - windowed.length;
-      const indicators = [
-        ...(above > 0 ? [`↑ ${above} above`] : []),
-        ...(below > 0 ? [`… ${below} more`] : []),
-      ];
-      if (indicators.length > 0)
-        lines.push(theme.fg("dim", `  ${indicators.join(" · ")}`));
+      if (window.below > 0)
+        lines.push(theme.fg("dim", `  ↓ ${window.below} more`));
+      const selected = rows.find((row) => row.snap.id === window.selectedId);
+      const hint = controller.expanded
+        ? [
+            "↑/↓ to select",
+            "enter to view",
+            ...(selected?.snap.status === "running" ? ["x to stop"] : []),
+            "esc to close",
+            "/subagents for history",
+          ]
+        : ["↓↓ to manage"];
+      lines.push(
+        truncateToWidth(theme.fg("dim", "  " + hint.join(" · ")), width),
+      );
       return lines;
     },
   };

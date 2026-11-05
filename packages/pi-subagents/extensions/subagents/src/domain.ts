@@ -7,6 +7,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import type { DelegationIdentity } from "../../shared/child-delegation.ts";
 import type {
   ModelRegistry,
   SessionContext,
@@ -105,9 +106,12 @@ export interface ParentContext {
    * conversation; model-origin subagents stay isolated.
    */
   readonly contextMessages?: SessionContext["messages"];
+  /** Trusted manager/runtime context, attached only by host-owned tool handlers. */
+  readonly delegation?: { readonly runtime: unknown; readonly owner: unknown };
 }
 
 export interface SpawnTask {
+  readonly ancestry?: DelegationIdentity;
   /** Omitted for normal tool-driven spawns. */
   readonly origin?: SubagentOrigin;
   /** Self-contained task prompt; the child cannot see the parent conversation. */
@@ -156,6 +160,13 @@ export type TranscriptPart =
       readonly toolId: string;
       readonly name: string;
       readonly argsPreview?: string;
+      /**
+       * Full pretty-printed arguments, set only by the persisted-transcript
+       * loader (`src/persisted/`), which reads them straight off disk. The
+       * live pipeline keeps only the bounded single-line `argsPreview`; this
+       * field is what the takeover view reveals with `ctrl+o`.
+       */
+      readonly args?: string;
     };
 
 export type TranscriptItem =
@@ -274,6 +285,7 @@ export interface SubagentUsage {
  */
 export interface SubagentSnapshot {
   readonly id: string;
+  readonly ancestry?: DelegationIdentity;
   readonly origin: SubagentOrigin;
   readonly backend: BackendName;
   readonly description: string;
@@ -300,7 +312,7 @@ export interface SubagentSnapshot {
   readonly queued: ReadonlyArray<QueuedMessage>;
   /** Final text of the most recent completed run (v1 `finalOutput`). */
   readonly finalText: string;
-  /** Count of finalized assistant messages (for subagent_check). */
+  /** Count of finalized assistant messages in this run. */
   readonly turns: number;
 }
 
@@ -322,6 +334,11 @@ export function latestText(snap: SubagentSnapshot) {
   const live = snap.liveAssistant?.text.trim();
   if (live) return live;
   return snap.finalText;
+}
+
+export function formatAncestry(snap: Pick<SubagentSnapshot, "ancestry">) {
+  const ancestry = snap.ancestry;
+  return ancestry ? `d${ancestry.depth} ← ${ancestry.parentId ?? "main"}` : "";
 }
 
 export function formatElapsedBetween(startedAt: number, endedAt?: number) {

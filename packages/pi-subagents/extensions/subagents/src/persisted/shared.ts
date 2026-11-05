@@ -3,6 +3,8 @@
  * Claude Code project JSONL). All functions are pure: no I/O, no state.
  */
 
+import { redactSecrets } from "../../../shared/transcript.ts";
+
 /** Parse one JSONL line. Blank and malformed lines yield undefined (skipped). */
 export function parseJsonLine(line: string): unknown | undefined {
   // A UTF-8 BOM at the start of the first line would otherwise fail JSON.parse.
@@ -28,11 +30,28 @@ export function previewOf(text: string): string | undefined {
   );
 }
 
-/** JSON.stringify tool-call arguments (skips {} and unserializable values). */
+/**
+ * Single-line JSON.stringify of tool-call arguments, redacted (skips {} and
+ * unserializable values). This is the collapsed-view preview.
+ */
 export function safeJsonPreview(value: unknown): string | undefined {
   try {
     const text = JSON.stringify(value);
-    return !text || text === "{}" ? undefined : text;
+    return !text || text === "{}" ? undefined : redactSecrets(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Full pretty-printed, redacted tool-call arguments for the expanded view.
+ * The persisted loader reads these off disk, so unlike the live pipeline's
+ * bounded preview nothing is truncated.
+ */
+export function safeJsonArgs(value: unknown): string | undefined {
+  try {
+    const text = JSON.stringify(value, null, 2);
+    return !text || text === "{}" ? undefined : redactSecrets(text);
   } catch {
     return undefined;
   }

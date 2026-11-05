@@ -15,11 +15,20 @@ import type {
 import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
 import { Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isModelVisible } from "../by-the-way.ts";
-import { formatElapsed, type SubagentSnapshot } from "../domain.ts";
-import { formatContextUtilization, formatCost } from "../format.ts";
+import {
+  formatAncestry,
+  formatElapsed,
+  type SubagentSnapshot,
+} from "../domain.ts";
+import { formatContextTokens, formatCost } from "../format.ts";
 import type { SubagentReadModel } from "../manager.ts";
+import { statusGlyph, statusWord } from "./activity-row.ts";
 import { buildTranscriptLines, mergeTranscripts } from "./transcript.ts";
 import { loadPersistedTranscript } from "../persisted/transcript.ts";
+
+// Re-exported for consumers that import the glyph and word helpers from
+// this module.
+export { statusGlyph, statusWord };
 
 export function configuredKeys(
   keybindings: KeybindingsManager,
@@ -28,49 +37,73 @@ export function configuredKeys(
   return keybindings.getKeys(binding).join("/") || "unbound";
 }
 
-export function statusGlyph(
-  snap: Pick<SubagentSnapshot, "status">,
+export function takeoverHeader(
+  snap: SubagentSnapshot,
   theme: Theme,
-): string {
-  switch (snap.status) {
-    case "running":
-      return theme.fg("warning", "■");
-    case "done":
-      return theme.fg("success", "■");
-    case "error":
-      return theme.fg("error", "■");
-    case "cancelled":
-      return theme.fg("warning", "■");
-  }
-}
-
-export function statusWord(
-  snap: Pick<SubagentSnapshot, "status">,
-  theme: Theme,
-): string {
-  switch (snap.status) {
-    case "running":
-      return theme.fg("warning", "running");
-    case "done":
-      return theme.fg("success", "done");
-    case "error":
-      return theme.fg("error", "failed");
-    case "cancelled":
-      return theme.fg("warning", "cancelled");
-  }
-}
-
-export function takeoverHeader(snap: SubagentSnapshot, theme: Theme): string {
-  const utilization = formatContextUtilization(snap.usage);
+  frame = 0,
+  width = 120,
+): { identity: string; metadata: string; ancestry?: string } {
+  const utilization = formatContextTokens(snap.usage);
   const cost = formatCost(snap.usage.costUsd);
-  return (
-    `${statusGlyph(snap, theme)} ` +
-    theme.fg("accent", theme.bold(`${snap.id} · ${snap.description}`)) +
-    theme.fg("muted", ` · ${snap.status} · ${formatElapsed(snap)}`) +
-    theme.fg("dim", ` · ${snap.backend}: ${snap.meta.modelLabel ?? "?"}`) +
-    (utilization ? theme.fg("dim", ` · ${utilization}`) : "") +
-    (cost ? theme.fg("dim", ` · ${cost}`) : "")
+  const identity =
+    `${statusGlyph(snap, theme, frame)} ` +
+    theme.fg("accent", theme.bold(`${snap.id} · ${snap.description}`));
+  const status = statusWord(snap, theme);
+  const details = [
+    formatElapsed(snap),
+    `${snap.backend}${snap.meta.modelLabel ? `: ${snap.meta.modelLabel}` : ""}`,
+    utilization,
+    cost,
+  ].filter(Boolean);
+  // Each field carries its own dim span: the status word closes with a
+  // foreground reset, which would cancel a single wrapper around the join.
+  const metadata = [
+    status,
+    ...details.map((part) => theme.fg("dim", part)),
+  ].join(theme.fg("dim", " · "));
+  const ancestry = formatAncestry(snap);
+  return {
+    identity: truncateToWidth(identity, width),
+    metadata: truncateToWidth(metadata, width),
+    ...(ancestry
+      ? { ancestry: truncateToWidth(theme.fg("dim", ancestry), width) }
+      : {}),
+  };
+}
+
+export function fitTakeoverHints(
+  width: number,
+  required: readonly string[],
+  controls: readonly string[],
+  navigation: readonly string[],
+): string {
+  const requiredParts = required.map((item) => {
+    const separator = item.lastIndexOf(" ");
+    return separator < 0
+      ? { keys: "", label: item }
+      : { keys: item.slice(0, separator), label: item.slice(separator) };
+  });
+  const remainingWidth = Math.max(
+    0,
+    width -
+      Math.max(0, required.length - 1) * visibleWidth(" · ") -
+      requiredParts.reduce(
+        (total, part) => total + visibleWidth(part.label),
+        0,
+      ),
   );
+  const keysWidth = required.length
+    ? Math.floor(remainingWidth / required.length)
+    : 0;
+  const selected = requiredParts.map(
+    ({ keys, label }) => `${truncateToWidth(keys, keysWidth)}${label}`,
+  );
+  for (const item of [...controls, ...navigation]) {
+    if (visibleWidth([...selected, item].join(" · ")) <= width) {
+      selected.push(item);
+    }
+  }
+  return truncateToWidth(selected.join(" · "), width);
 }
 
 // --- Entry points --------------------------------------------------------------
@@ -346,12 +379,15 @@ class SubagentDashboard implements Component {
         : theme.fg("text", snap.description);
       const left = ` ${marker} ${statusGlyph(snap, theme)} ${label} ${theme.fg("dim", snap.id)}`;
 
-      // Right: backend · model · context utilization · elapsed · status
-      const utilization = formatContextUtilization(snap.usage);
+      // Right: backend · model · token occupancy · elapsed · status
+      const utilization = formatContextTokens(snap.usage);
       const dot = theme.fg("dim", " · ");
       const rightParts = [
+        ...(formatAncestry(snap)
+          ? [theme.fg("muted", formatAncestry(snap))]
+          : []),
         theme.fg("muted", snap.backend),
-        theme.fg("muted", snap.meta.modelLabel ?? "?"),
+        theme.fg("accent", `model ${snap.meta.modelLabel ?? "?"}`),
         ...(utilization ? [theme.fg("muted", utilization)] : []),
         theme.fg("muted", formatElapsed(snap)),
         statusWord(snap, theme),
@@ -404,7 +440,8 @@ export class TakeoverView implements Component, Focusable {
   private loadingTranscript = false;
   // Hidden by default like the main session (hideThinkingBlock); ctrl+t toggles.
   private showThinking = false;
-  private showTools = true;
+  private toolsExpanded = false;
+  private spinnerFrame = 0;
   private closed = false;
 
   private _focused = false;
@@ -440,8 +477,11 @@ export class TakeoverView implements Component, Focusable {
       else this.loadFullTranscript();
       this.scheduleRender();
     });
-    // Elapsed time in the header ticks along at 1Hz.
-    this.ticker = setInterval(() => this.tui.requestRender(), 1000);
+    // Elapsed time and the running glyph tick along at 1Hz.
+    this.ticker = setInterval(() => {
+      this.spinnerFrame++;
+      this.tui.requestRender();
+    }, 1000);
     this.loadFullTranscript();
     this.input.onSubmit = (value: string) => this.submit(value);
   }
@@ -528,7 +568,7 @@ export class TakeoverView implements Component, Focusable {
       return;
     }
     if (this.keybindings.matches(data, "app.tools.expand")) {
-      this.showTools = !this.showTools;
+      this.toolsExpanded = !this.toolsExpanded;
       this.tui.requestRender();
       return;
     }
@@ -558,14 +598,14 @@ export class TakeoverView implements Component, Focusable {
       return;
     }
     if (this.keybindings.matches(data, "tui.editor.pageUp")) {
-      this.scrollOffset += this.viewportHeight();
+      this.scrollOffset += this.viewportHeight(this.snap()?.ancestry ? 1 : 0);
       this.tui.requestRender();
       return;
     }
     if (this.keybindings.matches(data, "tui.editor.pageDown")) {
       this.scrollOffset = Math.max(
         0,
-        this.scrollOffset - this.viewportHeight(),
+        this.scrollOffset - this.viewportHeight(this.snap()?.ancestry ? 1 : 0),
       );
       this.tui.requestRender();
       return;
@@ -574,29 +614,29 @@ export class TakeoverView implements Component, Focusable {
     this.tui.requestRender();
   }
 
-  private viewportHeight(): number {
+  private viewportHeight(extraRows = 0): number {
     const rows = this.tui.terminal.rows || 30;
-    // The complete view renders viewport + 7 chrome rows. Using rows - 8
-    // makes the overlay exactly terminal rows - 1.
-    return Math.max(6, rows - 8);
+    // The root view renders viewport + 7 chrome rows. Each extra header row
+    // reduces the viewport so the overlay stays terminal rows - 1.
+    return Math.max(6, rows - 8 - extraRows);
   }
 
   render(width: number): string[] {
     const theme = this.theme;
-    const border = theme.fg("borderAccent", "─".repeat(Math.max(1, width)));
+    const divider = theme.fg("dim", "─".repeat(Math.max(1, width)));
+    const accent = theme.fg("borderAccent", "─".repeat(Math.max(1, width)));
     const lines: string[] = [];
     const snap = this.snap();
 
     if (!snap) {
-      lines.push(border);
       lines.push(theme.fg("dim", `${this.id} is no longer tracked`));
-      lines.push(border);
       return lines;
     }
 
-    lines.push(border);
-    lines.push(truncateToWidth(takeoverHeader(snap, theme), width));
-    lines.push(border);
+    const header = takeoverHeader(snap, theme, this.spinnerFrame, width);
+    lines.push(header.identity, header.metadata);
+    if (header.ancestry) lines.push(header.ancestry);
+    lines.push(divider);
 
     // Fixed-height transcript viewport. Error and scroll status consume rows
     // inside the viewport so streaming/scrolling never changes overlay height.
@@ -607,9 +647,13 @@ export class TakeoverView implements Component, Focusable {
       },
       width,
       theme,
-      { showThinking: this.showThinking, showTools: this.showTools },
+      {
+        showThinking: this.showThinking,
+        toolsExpanded: this.toolsExpanded,
+        frame: this.spinnerFrame,
+      },
     );
-    const viewport = this.viewportHeight();
+    const viewport = this.viewportHeight(header.ancestry ? 1 : 0);
     const statusRows =
       (snap.errorText ? 1 : 0) +
       (this.loadingTranscript ? 1 : 0) +
@@ -627,7 +671,7 @@ export class TakeoverView implements Component, Focusable {
       );
     }
     if (this.loadingTranscript) {
-      body.push(theme.fg("dim", "loading full persisted transcript…"));
+      body.push(theme.fg("dim", "loading transcript…"));
     }
     if (this.transcriptError) {
       body.push(
@@ -669,18 +713,26 @@ export class TakeoverView implements Component, Focusable {
     while (body.length < viewport) body.push("");
     lines.push(...body.slice(0, viewport));
 
-    lines.push(border);
+    lines.push(accent);
     lines.push(...this.input.render(width));
-    lines.push(
-      truncateToWidth(
-        theme.fg(
-          "dim",
-          `${configuredKeys(this.keybindings, "tui.input.submit")} send · ${configuredKeys(this.keybindings, "app.interrupt")} back · ${configuredKeys(this.keybindings, "app.thinking.toggle")} thinking · ${configuredKeys(this.keybindings, "app.tools.expand")} tools · ${configuredKeys(this.keybindings, "app.clear")} abort run · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")} scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page`,
-        ),
-        width,
-      ),
+    const hints = fitTakeoverHints(
+      width,
+      [
+        `${configuredKeys(this.keybindings, "tui.input.submit")} send`,
+        `${configuredKeys(this.keybindings, "app.interrupt")} back`,
+      ],
+      [
+        `${configuredKeys(this.keybindings, "app.thinking.toggle")} thinking`,
+        `${configuredKeys(this.keybindings, "app.tools.expand")} tools`,
+        `${configuredKeys(this.keybindings, "app.clear")} abort`,
+      ],
+      [
+        `${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")} scroll`,
+        `${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page`,
+      ],
     );
-    lines.push(border);
+    lines.push(truncateToWidth(theme.fg("dim", hints), width));
+    lines.push(accent);
     return lines;
   }
 

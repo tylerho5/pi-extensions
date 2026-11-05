@@ -1,5 +1,5 @@
 /**
- * /subagent-model — pick the default model and effort for each delegation tier.
+ * Pick the default model and effort for a delegation tier.
  *
  * A tier is a fixed harness, so the flow selects the tier first and then the
  * model that tier's harness accepts. These defaults are what a tier resolves
@@ -100,6 +100,7 @@ export interface TierPickerDeps {
   readonly cwd: string;
   readonly models: readonly Model<Api>[];
   readonly ceiling: number | null;
+  readonly tier?: DelegationTier;
 }
 
 export interface TierPickerResult {
@@ -115,11 +116,14 @@ export async function pickTierConfig(
   deps: TierPickerDeps,
 ): Promise<TierPickerResult | undefined> {
   const { ui, config } = deps;
-  const labels = DELEGATION_TIERS.map((tier) => tierLabel(config, tier));
-  const tierChoice = await ui.select("Subagent tier", labels);
-  if (tierChoice === undefined) return undefined;
-  const tier = DELEGATION_TIERS[labels.indexOf(tierChoice)];
-  if (tier === undefined) return undefined;
+  let tier = deps.tier;
+  if (tier === undefined) {
+    const labels = DELEGATION_TIERS.map((tier) => tierLabel(config, tier));
+    const tierChoice = await ui.select("Subagent tier", labels);
+    if (tierChoice === undefined) return undefined;
+    tier = DELEGATION_TIERS[labels.indexOf(tierChoice)];
+    if (tier === undefined) return undefined;
+  }
 
   if (tier === "claude") {
     const model = await ui.select("Default Claude Code subagent model", [

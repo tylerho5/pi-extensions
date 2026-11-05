@@ -19,12 +19,12 @@ const BackendRegistryLive = Layer.sync(BackendRegistry, () => {
   );
 });
 
-import { SubagentManagerLive } from "./manager.ts";
+import { makeSubagentManagerLayer } from "./manager.ts";
 
-const AppLayer = SubagentManagerLive.pipe(Layer.provide(BackendRegistryLive));
-
-export function createSubagentRuntime() {
-  return ManagedRuntime.make(AppLayer);
+export function createSubagentRuntime(options: { maxDepth?: number } = {}) {
+  return ManagedRuntime.make(
+    makeSubagentManagerLayer(options).pipe(Layer.provide(BackendRegistryLive)),
+  );
 }
 
 export type SubagentRuntime = ReturnType<typeof createSubagentRuntime>;
