@@ -52,10 +52,10 @@
         "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
-        "version": "0.2.1",
-        "sourceHash": "sha256:4cd1aff8b2ec9ef8b6654bb06f6b417ec5a1ba3a72cea913ee1aea72fa5ea504",
-        "at": "2026-09-21T03:37:06.482Z",
-        "integrity": "sha512-CbY0S/MHF7HgG8CQUS/u8UE4Zor5AT5Gn3ifStWSqui88ehZEOAr3oGutGvuB0Jq15jRdJhraetcT4SFYf4lnQ=="
+        "version": "0.2.2",
+        "sourceHash": "sha256:56c7d4c268afc975a2571ab381fa80faffb10864e279fc913c161be5891d2471",
+        "at": "2026-11-05T22:51:42.052Z",
+        "integrity": "sha512-e0CS8XwN7hAt1/AzIs+H60NejW7XtAIhLvKuudA+NzyK/ptZmYycmrxV0T+LWiC+01YMOarM0K9lF8L49RrlMw=="
       }
     },
     "@tylerho/pi-reminders": {
