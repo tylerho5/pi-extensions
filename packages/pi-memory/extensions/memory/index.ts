@@ -51,6 +51,11 @@ import {
 } from "./src/prompt.ts";
 import { RecallLedger, RECALL_MESSAGE_TYPE } from "./src/recall-ledger.ts";
 import { createSelectorComplete } from "./src/recall-model.ts";
+import {
+  hasLaterRequest,
+  RecallPrefetch,
+  type BoundaryEventLike,
+} from "./src/recall-prefetch.ts";
 import { runRecall } from "./src/recall.ts";
 import { loadMemorySettings } from "./src/settings.ts";
 import { resolveVariant } from "./src/variant.ts";
@@ -64,6 +69,28 @@ const MEMORY_WRITE_ENTRY = "memory-write";
 /** Persistent status line while a dream is in flight — the "don't close yet" signal. */
 const DREAM_STATUS_KEY = "dream";
 const DREAM_SHUTDOWN_WAIT_MS = 2_000;
+
+/**
+ * A `turn_end` boundary entry. The pinned @earendil-works/pi-coding-agent types
+ * predate the boundary API (they type `turn_end` as notification-only), so the
+ * handler result is cast into the newer shape; current pi accepts it.
+ */
+interface RecallBoundaryEntry {
+  type: "custom_message";
+  customType: string;
+  content: string;
+  display: boolean;
+  details?: unknown;
+}
+
+interface RecallBoundaryEvent extends BoundaryEventLike {
+  entries: RecallBoundaryEntry[];
+}
+
+type RecallBoundaryHandler = (
+  event: RecallBoundaryEvent,
+  ctx: ExtensionContext,
+) => { entries?: RecallBoundaryEntry[] } | undefined;
 
 /** Race a task against a deadline without letting a rejection escape. */
 async function waitBounded(task: Promise<unknown>, timeoutMs: number) {
@@ -108,6 +135,9 @@ export default function memory(pi: ExtensionAPI) {
    * Claude Code rebuilds the conversation: compaction.
    */
   const recallLedger = new RecallLedger();
+
+  /** The one in-flight recall prefetch, consumed at the next boundary. */
+  const recallPrefetch = new RecallPrefetch();
 
   /**
    * Dream state. `lastDreamScanAt` is the per-process scan throttle (gate 6);
@@ -252,6 +282,7 @@ export default function memory(pi: ExtensionAPI) {
     paused = false;
     pendingMemoryWrites.clear();
     cancelDreamTimer();
+    recallPrefetch.abort();
     dreamStatusCtx = ctx;
     // Rebuild the ledger from the transcript. A fresh session file contains
     // no memory-recall entries yet, so rebuilding yields an empty ledger;
@@ -270,64 +301,91 @@ export default function memory(pi: ExtensionAPI) {
   // refreshes its memory files. Anything saved this session lands here.
   pi.on("session_compact", async (_event, ctx) => {
     recallLedger.reset();
+    recallPrefetch.abort();
     if (!loadMemorySettings(ctx.cwd).enabled) return;
     indexSection = await loadIndexSection(ctx.cwd);
   });
 
   /**
-   * The per-turn relevance prefetch. Blocks the turn on a cheap selector call so
-   * the surfaced memories are present for the same turn that triggered them, the
-   * way Claude Code's prefetch collects before the main request. Fail-open: any
-   * problem (no model, no key, timeout, bad reply) surfaces nothing and the turn
-   * proceeds untouched.
+   * Start the per-turn relevance prefetch without waiting on it. The selector
+   * runs concurrently with the main model, the way Claude Code starts it at
+   * turn start; the settled result is attached at the next boundary by
+   * `consumeRecall`. Fail-open: a missing model, missing key, timeout or bad
+   * reply settles as nothing and the turn proceeds untouched.
    */
-  const recall = async (
+  const startRecallPrefetch = (
     dir: string,
     query: string,
     settings: ReturnType<typeof loadMemorySettings>,
     ctx: ExtensionContext,
   ) => {
-    if (ctx.hasUI) ctx.ui.setStatus(RECALL_STATUS_KEY, undefined);
-    try {
+    recallPrefetch.start(async (signal) => {
       const complete = await createSelectorComplete(
         ctx.modelRegistry,
         settings.recall,
       );
       if (!complete) return undefined;
-
-      const result = await runRecall({
+      return runRecall({
         query,
         dir,
         complete,
         alreadyInjected: recallLedger.alreadyInjected,
         sessionBytes: recallLedger.sessionBytes,
         now: Date.now(),
-        signal: ctx.signal,
+        signal: ctx.signal ? AbortSignal.any([signal, ctx.signal]) : signal,
       });
-      if (!result) return undefined;
-
-      recallLedger.markInjected(result.injectedPaths, result.bytes);
-      if (ctx.hasUI) {
-        const n = result.injectedPaths.length;
-        ctx.ui.setStatus(
-          RECALL_STATUS_KEY,
-          ctx.ui.theme.fg(
-            "muted",
-            `✦ recalled ${n} ${n === 1 ? "memory" : "memories"}`,
-          ),
-        );
-      }
-
-      return {
-        customType: RECALL_MESSAGE_TYPE,
-        content: result.content,
-        display: true,
-        details: { paths: result.injectedPaths },
-      };
-    } catch {
-      return undefined;
-    }
+    });
   };
+
+  /**
+   * Attach a settled prefetch at the next model-request boundary. The custom
+   * message is stored on the session and replays on the next request, matching
+   * Claude Code's "consume when settled" prefetch. No continuation is
+   * requested, so recall never forces an extra turn: a result that lands after
+   * the final turn reaches the next user prompt instead.
+   */
+  const consumeRecall = (ctx: ExtensionContext) => {
+    const result = recallPrefetch.take();
+    if (!result) return undefined;
+    recallLedger.markInjected(result.injectedPaths, result.bytes);
+    if (ctx.hasUI) {
+      const n = result.injectedPaths.length;
+      ctx.ui.setStatus(
+        RECALL_STATUS_KEY,
+        ctx.ui.theme.fg(
+          "muted",
+          `✦ recalled ${n} ${n === 1 ? "memory" : "memories"}`,
+        ),
+      );
+    }
+    return {
+      customType: RECALL_MESSAGE_TYPE,
+      content: result.content,
+      display: true,
+      details: { paths: result.injectedPaths },
+    };
+  };
+
+  // A settled prefetch attaches at `turn_end`, which fires after the assistant
+  // message and its tool results are appended, so the attachment never lands
+  // between a tool call and its result. It attaches only when the run will
+  // issue another request; a recall that settles after the final response is
+  // dropped, the way Claude Code aborts an unconsumed prefetch when the run
+  // ends. `turn_end` is a boundary event the pinned types do not yet model, so
+  // the registration is cast to the newer shape.
+  const onTurnEnd: RecallBoundaryHandler = (event, ctx) => {
+    if (!hasLaterRequest(event)) return undefined;
+    const attachment = consumeRecall(ctx);
+    if (!attachment) return undefined;
+    return {
+      entries: [...event.entries, { type: "custom_message", ...attachment }],
+    };
+  };
+  const onBoundary = pi.on as unknown as (
+    event: "turn_end",
+    handler: RecallBoundaryHandler,
+  ) => () => void;
+  onBoundary("turn_end", onTurnEnd);
 
   /**
    * Memory writes surface as their own transcript row. The generic tool row
@@ -442,20 +500,20 @@ export default function memory(pi: ExtensionAPI) {
       .filter(Boolean)
       .join("\n\n");
 
-    const recallMessage = settings.recall.enabled
-      ? await recall(dir, event.prompt, settings, ctx)
-      : undefined;
+    if (ctx.hasUI) ctx.ui.setStatus(RECALL_STATUS_KEY, undefined);
+    if (settings.recall.enabled) {
+      startRecallPrefetch(dir, event.prompt, settings, ctx);
+    }
 
-    return {
-      systemPrompt,
-      ...(recallMessage && { message: recallMessage }),
-    };
+    return { systemPrompt };
   });
 
   // Idle trigger: arm a timer once the session goes quiet, so a dream only runs
   // when the user has actually stopped and never contends for the model. The
   // gates re-check everything when it fires.
   pi.on("agent_settled", (_event, ctx) => {
+    // The run is over; drop a prefetch that never reached a boundary.
+    recallPrefetch.abort();
     if (ctx.mode !== "tui") return;
     dreamStatusCtx = ctx;
     cancelDreamTimer();
@@ -478,6 +536,7 @@ export default function memory(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     cancelDreamTimer();
+    recallPrefetch.abort();
     if (activeDream) {
       activeDream.controller.abort();
       await waitBounded(activeDream.done, DREAM_SHUTDOWN_WAIT_MS);

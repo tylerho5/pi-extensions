@@ -4,15 +4,18 @@
  * (2.1.220, ~byte 237.7M), minus the team-store tier.
  *
  * List candidates → drop ones already surfaced this session → have the selector
- * pick up to five → read their bodies → format for injection, honoring a
- * per-session byte budget. Any selector failure returns undefined (fail open):
- * a turn never breaks or stalls because recall could not run.
+ * pick up to five → read their bodies (cut to Claude Code's per-file limit) →
+ * format for injection, honoring a per-session byte budget. Any selector
+ * failure returns undefined (fail open): a turn never breaks or stalls because
+ * recall could not run. The returned result is consumed by `RecallPrefetch` at
+ * the next boundary, not awaited inline.
  */
 
 import { readFile } from "node:fs/promises";
 import { listMemoryCandidates, type MemoryCandidate } from "./candidates.ts";
 import { formatRecalledMemories, type RecalledMemory } from "./injection.ts";
 import { selectMemories, type SelectorComplete } from "./selector.ts";
+import { truncateMemoryBody } from "./truncate.ts";
 
 /** Claude Code's per-session injection budget (`MAX_SESSION_BYTES`). */
 export const MAX_SESSION_BYTES = 60_000;
@@ -90,10 +93,9 @@ export async function runRecall(
   let addedBytes = 0;
   for (const candidate of selected) {
     if (options.alreadyInjected.has(candidate.path)) continue;
-    const body = (
-      await readBody(candidate.path).catch(() => undefined)
-    )?.trim();
-    if (!body) continue;
+    const raw = (await readBody(candidate.path).catch(() => undefined))?.trim();
+    if (!raw) continue;
+    const { text: body, truncatedBy } = truncateMemoryBody(raw);
     const size = Buffer.byteLength(body, "utf8");
     // Always surface at least one; stop before a memory that blows the budget.
     if (
@@ -102,7 +104,12 @@ export async function runRecall(
     ) {
       break;
     }
-    memories.push({ path: candidate.path, mtimeMs: candidate.mtimeMs, body });
+    memories.push({
+      path: candidate.path,
+      mtimeMs: candidate.mtimeMs,
+      body,
+      ...(truncatedBy && { truncatedBy }),
+    });
     injectedPaths.push(candidate.path);
     addedBytes += size;
   }

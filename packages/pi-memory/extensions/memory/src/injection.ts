@@ -1,8 +1,9 @@
 /**
  * Formatting recalled memories for injection, reproducing Claude Code's
  * `relevant_memories` renderer, `Ww` system-reminder wrapper, memory header
- * (`D$o`), and staleness note (`Yds`) from the bundled CLI (2.1.220, ~byte
- * 237.7M / 230.8M / 238.06M).
+ * (`D$o`), staleness note (`Yds`), and truncation notice (`eEr`) from the
+ * bundled CLI (2.1.220, ~byte 237.7M / 230.8M / 238.06M; notice re-verified in
+ * 2.1.290).
  *
  * The result is one message body: each memory in its own `<system-reminder>`
  * block, the first carrying the "retrieved for possible relevance" preamble.
@@ -10,6 +11,8 @@
  * one), where Claude Code emits one isMeta message per memory — the model sees
  * the same text either way.
  */
+
+import { RECALL_MAX_BYTES, RECALL_MAX_LINES } from "./truncate.ts";
 
 const DAY_MS = 86_400_000;
 
@@ -25,6 +28,8 @@ export interface RecalledMemory {
   readonly path: string;
   readonly mtimeMs: number;
   readonly body: string;
+  /** Set when the body was cut to the recall limits. */
+  readonly truncatedBy?: "bytes" | "lines";
 }
 
 export interface InjectionOptions {
@@ -58,6 +63,18 @@ export function memoryHeader(path: string, mtimeMs: number, now: number) {
   return stale ? `${stale}\n\n${head}` : head;
 }
 
+/**
+ * Claude Code's `eEr` truncation notice, with pi's `read` tool in place of the
+ * Claude Code tool name. The path is the one the model reads to see the rest.
+ */
+export function truncationNotice(truncatedBy: "bytes" | "lines", path: string) {
+  const limit =
+    truncatedBy === "bytes"
+      ? `${RECALL_MAX_BYTES} byte limit`
+      : `first ${RECALL_MAX_LINES} lines`;
+  return `> This memory file was truncated (${limit}). Use the read tool to view the complete file at: ${path}`;
+}
+
 /** Claude Code's `Ww`. */
 export function wrapSystemReminder(text: string) {
   return `<system-reminder>\n${text}\n</system-reminder>`;
@@ -72,10 +89,10 @@ function block(
     ? RECALL_PREAMBLE + CITE_CLAUSE
     : RECALL_PREAMBLE;
   const parts = first ? [preamble] : [];
-  parts.push(
-    memoryHeader(memory.path, memory.mtimeMs, options.now),
-    memory.body,
-  );
+  const body = memory.truncatedBy
+    ? `${memory.body}\n\n${truncationNotice(memory.truncatedBy, memory.path)}`
+    : memory.body;
+  parts.push(memoryHeader(memory.path, memory.mtimeMs, options.now), body);
   return wrapSystemReminder(parts.join("\n\n"));
 }
 
