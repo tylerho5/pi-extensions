@@ -29,7 +29,7 @@ Extensions for the pi coding agent, published as individual npm packages under t
 | [`@tylerho/pi-summaries`](packages/pi-summaries) | published 0.2.2 | Generates a compact recap of each agent run and appends it to the session once the run settles. |
 | [`@tylerho/pi-turn-end`](packages/pi-turn-end) | wip (source only) | Appends a one-line marker to the session each time the agent stops: how long it worked and when it stopped. |
 | [`@tylerho/pi-web-fetch`](packages/pi-web-fetch) | published 0.2.0 | Fetches a URL and converts it to markdown, with a Jina reader fallback and an optional cheap-model answer pass. |
-| [`@tylerho/pi-workflows`](packages/pi-workflows) | published 0.2.1 | Sandboxed multi-agent workflow orchestration, plus a deterministic multi-angle code review built on it. |
+| [`@tylerho/pi-workflows`](packages/pi-workflows) | published 0.3.0 | Sandboxed multi-agent workflow orchestration, plus a deterministic multi-angle code review built on it. |
 | [`@tylerho/pi-worktree`](packages/pi-worktree) | published 0.2.2 | Lets the agent create, enter, and exit isolated git worktrees for parallel work in one repo. |
 
 `no record` = no publish record for the package in this repository's release ledger; it may still be live on npm.
