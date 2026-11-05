@@ -25,8 +25,16 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
 ] as const;
 
 /** Fresh SDK options avoid turning the denylist into an accidental allowlist. */
-export function childToolPolicy() {
-  return { excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES] };
+export function childToolPolicy(
+  options: { delegation?: "enabled" | "leaf" } = {},
+) {
+  const blocked = new Set<string>(CHILD_EXCLUDED_TOOL_NAMES);
+  if (options.delegation === "enabled" || options.delegation === "leaf") {
+    for (const name of ["subagent_send", "subagent_cancel", "subagent_list"])
+      blocked.delete(name);
+  }
+  if (options.delegation === "enabled") blocked.delete("subagent_spawn");
+  return { excludeTools: [...blocked] };
 }
 
 export interface ChildResourceOptions {

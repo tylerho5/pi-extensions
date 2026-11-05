@@ -312,13 +312,6 @@ export default function (pi: ExtensionAPI) {
             sessionId: ctx.sessionManager.getSessionId(),
             stateDir: agentDir,
             config,
-            confirmEnterPath: ctx.hasUI
-              ? (target) =>
-                  ctx.ui.confirm(
-                    "Enter worktree?",
-                    `Enter the worktree at ${target}? This moves the session's file tools and write access there.`,
-                  )
-              : undefined,
           },
           { name: params.name, path: params.path },
         );

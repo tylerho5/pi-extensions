@@ -9,7 +9,6 @@ import {
   getRepoRoot,
   git,
   isGitRepo,
-  isInside,
   isMergedIntoUpstream,
   listWorktrees,
   randomWorktreeName,
@@ -34,8 +33,6 @@ export interface WorktreeDeps {
   sessionId: string;
   stateDir: string;
   config?: Partial<WorktreeConfig>;
-  /** Asked before entering an existing worktree outside the managed root. Absent (headless) = refuse. */
-  confirmEnterPath?: (target: string) => Promise<boolean>;
 }
 
 export interface EnterWorktreeInput {
@@ -125,17 +122,6 @@ export async function enterWorktree(
       throw new WorktreeSessionError(
         `"${target}" is not a registered worktree of this repository (not in \`git worktree list\`). Pass the path of an existing worktree, or create one with \`name\`.`,
       );
-    }
-    const managedRoot = managedRootFor(repoRoot, config);
-    if (!isInside(managedRoot, existing.path)) {
-      const ok = deps.confirmEnterPath
-        ? await deps.confirmEnterPath(existing.path)
-        : false;
-      if (!ok) {
-        throw new WorktreeSessionError(
-          `Entering a worktree outside the managed root (${managedRoot}) requires interactive confirmation. Use a worktree under ${managedRoot}, or confirm the prompt when asked.`,
-        );
-      }
     }
     if (store.readLock(existing.path) && !store.isLockLive(existing.path)) {
       store.releaseLock(existing.path);

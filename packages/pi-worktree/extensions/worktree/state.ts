@@ -2,19 +2,19 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { readJsonOrDefault, writeJsonAtomic } from "../shared/state-file.ts";
+import {
+  parseWorktreeBinding,
+  type WorktreeBinding,
+} from "../shared/effective-cwd.ts";
 
-export interface ActiveWorktree {
-  worktreePath: string;
+export interface ActiveWorktree extends WorktreeBinding {
   branch: string | null;
   /** The commit the worktree was at when created/entered; removal guards compare against it. */
   baseCommit: string;
   /** Directory the session was opened in (the session cwd, never the worktree). */
   originalCwd: string;
-  /** The repo directory the session runs in; state only applies to sessions with this cwd. */
-  sessionCwd: string;
   /** True when the session entered a pre-existing worktree instead of creating one. */
   enteredExisting: boolean;
-  sessionId: string;
   pid: number;
   createdAt: number;
 }
@@ -59,7 +59,10 @@ export class WorktreeStateStore {
   }
 
   load(): ActiveWorktree | null {
-    return readJsonOrDefault<ActiveWorktree | null>(this.stateFile(), null);
+    // The shared leaf owns the on-disk shape: a record that cannot name its
+    // session and its tree is not a binding, and callers treat it as absent.
+    const raw = readJsonOrDefault<unknown>(this.stateFile(), null);
+    return parseWorktreeBinding(raw) ? (raw as ActiveWorktree) : null;
   }
 
   save(state: ActiveWorktree): void {
