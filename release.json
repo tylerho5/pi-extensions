@@ -66,10 +66,10 @@
         "at": "2026-11-05T22:47:53.090Z"
       },
       "published": {
-        "version": "0.3.0",
-        "sourceHash": "sha256:e2e3885bee27d03df3743078fa5051687f10442ef873ceaebfd1f17adb951b63",
-        "at": "2026-09-21T03:37:08.888Z",
-        "integrity": "sha512-Xud8IAXkRtZgtI/8ndzV19naGGVmOSXpe7hyfLxC6b/VlFKyc68nhw0CnSXB2ZKe3Xfxq6i6zJSuJ5iF+85+DQ=="
+        "version": "0.3.1",
+        "sourceHash": "sha256:a246e60c83cd02a1c49c872efc9bb1f678b4d8b720a52b688f010d2154c72588",
+        "at": "2026-11-05T22:51:44.232Z",
+        "integrity": "sha512-emjJYyjfnape0OF/jtu2Za+BSyRzP9y8SputXPqHhrTHaxThyxsghyxbrGxeMqRUcM0KvCQMmoykbourKop2eg=="
       }
     },
     "@tylerho/pi-worktree": {
