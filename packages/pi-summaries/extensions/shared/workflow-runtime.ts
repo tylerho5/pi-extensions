@@ -15,6 +15,16 @@ export interface AgentOptions {
   model?: string;
   provider?: string;
   effort?: string;
+  /**
+   * Settle the agent as failed when it produces an empty result and makes no
+   * tool calls other than `structured_output`. Off unless set to true.
+   */
+  requireWork?: boolean;
+  /**
+   * No-progress watchdog window in milliseconds for this agent. Defaults to the
+   * runner's 180-second `STALL_TIMEOUT_MS`.
+   */
+  stallMs?: number;
 }
 
 export interface BudgetView {
@@ -58,7 +68,8 @@ export interface WorkflowMeta {
   phases: WorkflowPhase[];
 }
 
-export type RunStatus = "completed" | "failed" | "aborted";
+export type RunStatus =
+  "completed" | "failed" | "aborted" | "paused" | "interrupted";
 
 export interface RunOutcome<T> {
   status: RunStatus;

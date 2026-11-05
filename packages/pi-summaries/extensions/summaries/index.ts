@@ -110,6 +110,7 @@ export default function (pi: ExtensionAPI) {
           modelRegistry: ctx.modelRegistry,
           config,
           transcript: serializeRunTranscript(entries),
+          sessionId: ctx.sessionManager.getSessionId(),
           signal: controller.signal,
         });
         recap = { ...generated, ...config };

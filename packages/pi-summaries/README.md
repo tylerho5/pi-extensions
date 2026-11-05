@@ -24,7 +24,7 @@ User activity drops an armed recap. The `input` handler calls `onUserActivity()`
 
 Child agents keep the recap deferred. The extension subscribes to [`shared/agent-activity.ts`](shared.md) when it loads, and a notification cancels the timer while any child reports a running count. When the last child settles and the session is idle, the listener re-arms it. A run whose subagent outlives the main agent still gets a recap, written after the child finishes.
 
-`summarizeRun` looks the configured model up with `ctx.modelRegistry.find(provider, model)` and throws `SummaryError` when the model is unavailable. It gets the key and headers from `getApiKeyAndHeaders`, then calls `completeSimple` from `@earendil-works/pi-ai/compat` with `SUMMARY_SYSTEM_PROMPT`, `maxRetries: 1`, `timeoutMs: 40_000`, and an outer `Effect.timeout("100 seconds")` that gives both attempts room. `reasoningOptions` passes the reasoning level through unless the level is `"off"`. Thinking tokens count toward DeepSeek's output budget, so a reasoning run gets `maxTokens: 8_000` and a run without reasoning gets `1_000`.
+`summarizeRun` looks the configured model up with `ctx.modelRegistry.find(provider, model)` and throws `SummaryError` when the model is unavailable. It gets the key and headers from `getApiKeyAndHeaders`. For `opencode` and `opencode-go` models, or models served from `opencode.ai`, it also sends `x-opencode-session` with the current pi session ID and `x-opencode-client: pi`, matching the core provider path. It then calls `completeSimple` from `@earendil-works/pi-ai/compat` with `SUMMARY_SYSTEM_PROMPT`, `maxRetries: 1`, `timeoutMs: 40_000`, and an outer `Effect.timeout("100 seconds")` that gives both attempts room. `reasoningOptions` passes the reasoning level through unless the level is `"off"`. Thinking tokens count toward DeepSeek's output budget, so a reasoning run gets `maxTokens: 8_000` and a run without reasoning gets `1_000`.
 
 A parse failure or a length-truncated response from a reasoning run retries once with reasoning off, which needs far fewer tokens. Transport failures do not retry. With reasoning already off, a length stop reports `The summary model response hit the token limit and was truncated.`, and any other parse failure reports that the model did not return valid recap JSON.
 
@@ -53,7 +53,7 @@ The extension registers one command, one entry renderer, and six event handlers.
 - `Change model…` runs `openModelPicker`, then `openReasoningPicker`, then `saveSummaryConfig`, and notifies `Summary model: <provider>/<model> · <reasoning>`. A dismiss at any step returns without a change, and a failed save notifies `Could not save the private summary model config.`
 - `Disable recaps` and `Enable recaps` flip `config.enabled`, save, and notify `Recaps disabled.` or `Recaps enabled.`. Disabling also calls `onUserActivity()`, which cancels the armed timer and aborts in-flight recaps. A failed save notifies `Could not save the private summary config.`
 
-`openModelPicker` offers `curatedModels(ctx.modelRegistry.getAvailable(), ctx.cwd)`, the same scope `/subagent-model` uses, cheapest first. A label reads `provider/model` and adds ` · $X/Mtok out` when the model reports an output cost. An empty list notifies `No configured models are available for run recaps.` and returns undefined. `openReasoningPicker` renders a `ThinkingSelectorComponent` limited to `getSupportedThinkingLevels(model)` and preselects the current level when the model supports it.
+`openModelPicker` offers `curatedModels(ctx.modelRegistry.getAvailable(), ctx.cwd)`, the same scope `/subagents-menu` uses, cheapest first. A label reads `provider/model` and adds ` · $X/Mtok out` when the model reports an output cost. An empty list notifies `No configured models are available for run recaps.` and returns undefined. `openReasoningPicker` renders a `ThinkingSelectorComponent` limited to `getSupportedThinkingLevels(model)` and preselects the current level when the model supports it.
 
 ### Events
 
@@ -81,7 +81,7 @@ The extension registers one command, one entry renderer, and six event handlers.
 ### Internal exports
 
 - `src/config.ts`: `REASONING_LEVELS`, `ReasoningLevel`, `SummaryConfig`, `DEFAULT_SUMMARY_CONFIG`, `DEFAULT_IDLE_DELAY_MS`, `MIN_IDLE_DELAY_MS`, `idleDelayMs()`, `PRIVATE_CONFIG_PATH()`, `parseSummaryConfig()`, `loadSummaryConfig()`, `saveSummaryConfig()`. `PRIVATE_CONFIG_PATH` is a function resolved at call time from `getAgentDir()`, not a module-load constant, so tests point it at a temp dir with `PI_CODING_AGENT_DIR`.
-- `src/summarizer.ts`: `RunRecap`, `parseRecapResponse()`, `reasoningOptions()`, `summarizeRun()`.
+- `src/summarizer.ts`: `RunRecap`, `parseRecapResponse()`, `reasoningOptions()`, `summarizeRun({ modelRegistry, config, transcript, sessionId, signal })`.
 - `src/prompt.ts`: `SUMMARY_SYSTEM_PROMPT`, `buildSummaryPrompt(transcript)`.
 - `src/ui.ts`: `RecapEntryData`, `renderRecap()`, `openModelPicker()`, `openReasoningPicker()`.
 

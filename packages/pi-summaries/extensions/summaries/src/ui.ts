@@ -76,7 +76,7 @@ function modelLabel(model: Model<Api>) {
   return `${modelKey(model)}${cost}`;
 }
 
-/** The enabled-models list, cheapest first — the same scope /subagent-model offers. */
+/** The enabled-models list, cheapest first — the same scope /subagents-menu offers. */
 export async function openModelPicker(ctx: ExtensionCommandContext) {
   const models = curatedModels(ctx.modelRegistry.getAvailable(), ctx.cwd);
   if (models.length === 0) {

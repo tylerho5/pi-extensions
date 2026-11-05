@@ -99,11 +99,23 @@ function assistantText(
     .join("\n");
 }
 
+function usesOpenCodeRouting(model: { provider: string; baseUrl: string }) {
+  if (model.provider === "opencode" || model.provider === "opencode-go") {
+    return true;
+  }
+  try {
+    return new URL(model.baseUrl).hostname === "opencode.ai";
+  } catch {
+    return false;
+  }
+}
+
 async function requestRecap(options: {
   readonly modelRegistry: ModelRegistry;
   readonly config: SummaryConfig;
   readonly transcript: string;
   readonly reasoning: SummaryConfig["reasoning"];
+  readonly sessionId: string;
   readonly signal: AbortSignal;
 }) {
   const model = options.modelRegistry.find(
@@ -134,7 +146,15 @@ async function requestRecap(options: {
     {
       apiKey: auth.apiKey,
       env: auth.env,
-      headers: auth.headers,
+      headers: {
+        ...auth.headers,
+        ...(options.sessionId && usesOpenCodeRouting(model)
+          ? {
+              "x-opencode-session": options.sessionId,
+              "x-opencode-client": "pi",
+            }
+          : {}),
+      },
       maxTokens:
         options.reasoning === "off"
           ? RETRY_FREE_MAX_TOKENS
@@ -169,6 +189,7 @@ export function summarizeRun(options: {
   readonly modelRegistry: ModelRegistry;
   readonly config: SummaryConfig;
   readonly transcript: string;
+  readonly sessionId: string;
   readonly signal: AbortSignal;
 }) {
   const completion = Effect.tryPromise({
