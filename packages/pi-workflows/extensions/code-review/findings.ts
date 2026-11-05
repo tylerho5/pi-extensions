@@ -26,13 +26,21 @@ export interface Finding {
   failure_scenario: string;
   /** kebab slug: correctness | simplification | efficiency | reuse | … */
   category: string;
-  verdict?: "CONFIRMED" | "PLAUSIBLE";
+  verdict?: "CONFIRMED" | "PLAUSIBLE" | "UNVERIFIED";
   outcome?: "fixed" | "skipped" | "no_change_needed";
 }
 
 export interface FindingsReport {
   level?: Effort;
   findings: Finding[];
+  coverage?: ReviewCoverage;
+}
+
+/** How much of the review ran: the step count, how many reported, which did not. */
+export interface ReviewCoverage {
+  steps: number;
+  ran: number;
+  missing: string[];
 }
 
 export interface CompletionNotification {
@@ -44,6 +52,8 @@ export interface CompletionNotification {
   scope?: string;
   /** True when --fix handed the findings back for edits. */
   fix?: boolean;
+  /** How much of the review ran; absent when the caller did not report it. */
+  coverage?: ReviewCoverage;
 }
 
 /** The short summary the completion renderer paints instead of the full report. */
@@ -57,6 +67,9 @@ export interface CompletionDigest {
   top: Finding[];
   runId?: string;
   fix: boolean;
+  steps: number;
+  ran: number;
+  missing: string[];
 }
 
 export function completionDigest(
@@ -72,6 +85,9 @@ export function completionDigest(
     top: findings.slice(0, 5),
     ...(notification.runId ? { runId: notification.runId } : {}),
     fix: notification.fix ?? false,
+    steps: notification.coverage?.steps ?? 0,
+    ran: notification.coverage?.ran ?? 0,
+    missing: notification.coverage?.missing ?? [],
   };
 }
 
@@ -83,6 +99,8 @@ export interface FailureNotification {
 export interface FindingsStore {
   findings: Finding[];
   level?: Effort;
+  /** Set by the launcher at settle, so a re-report can still say partial. */
+  coverage?: ReviewCoverage;
 }
 
 export function createFindingsStore(): FindingsStore {
@@ -140,7 +158,9 @@ export const REPORT_FINDINGS_PARAMS = Type.Object({
       short_summary: Type.String(),
       failure_scenario: Type.String(),
       category: Type.String(),
-      verdict: Type.Optional(StringEnum(["CONFIRMED", "PLAUSIBLE"] as const)),
+      verdict: Type.Optional(
+        StringEnum(["CONFIRMED", "PLAUSIBLE", "UNVERIFIED"] as const),
+      ),
       outcome: Type.Optional(
         StringEnum(["fixed", "skipped", "no_change_needed"] as const),
       ),
@@ -161,32 +181,56 @@ const REPORT_FINDINGS_DESCRIPTION = [
 
 /** Model-facing text for the findings message (the renderer shows the rich view). */
 export function findingsSummaryText(store: FindingsStore): string {
-  const { findings, level } = store;
+  const { findings, level, coverage } = store;
+  const missing = coverage?.missing ?? [];
   if (findings.length === 0) {
-    return `## Code review${level ? ` — ${level}` : ""}\n\nNo findings.`;
+    // A partial review with nothing to show must not read as a clean pass; the
+    // parent re-reports through this text after the completion handoff.
+    if (!coverage || missing.length === 0) {
+      return `## Code review${level ? ` — ${level}` : ""}\n\nNo findings.`;
+    }
+    return [
+      `## Code review incomplete${level ? ` — ${level}` : ""}`,
+      "",
+      partialCoverageLine(coverage),
+    ].join("\n");
   }
   const lines = findings.map((f) => {
     const verdict = f.verdict ? ` [${f.verdict}]` : "";
     const outcome = f.outcome ? ` (${f.outcome})` : "";
     return `- ${f.file}:${f.line} — ${f.short_summary}${verdict}${outcome}`;
   });
-  return [
+  const text = [
     `## Code review${level ? ` — ${level}` : ""}`,
     "",
     `${findings.length} finding${findings.length === 1 ? "" : "s"}:`,
     ...lines,
-  ].join("\n");
+  ];
+  if (coverage && missing.length > 0) {
+    text.push("", partialCoverageLine(coverage));
+  }
+  return text.join("\n");
 }
 
-/**
- * Merge findings into the store and emit/refresh the rendered findings message.
- */
+/** One line naming the steps that produced nothing. */
+function partialCoverageLine(coverage: ReviewCoverage): string {
+  return `Partial review: ${coverage.ran} of ${coverage.steps} steps ran; no coverage from: ${coverage.missing.join(", ")}.`;
+}
+
 export function formatCompletionNotification(
   notification: CompletionNotification,
 ): string {
   const level = ` — ${notification.level}`;
+  const coverage = notification.coverage;
+  const missing = coverage?.missing ?? [];
   if (notification.findings.length === 0) {
-    return `## Code review complete${level}\n\nNo findings.`;
+    if (!coverage || missing.length === 0) {
+      return `## Code review complete${level}\n\nNo findings.`;
+    }
+    const content = `## Code review incomplete${level}\n\n${partialCoverageLine(coverage)}`;
+    return notification.instruction
+      ? `${content}\n\n${notification.instruction}`
+      : content;
   }
   const findings = notification.findings
     .map((f, i) => {
@@ -202,7 +246,10 @@ export function formatCompletionNotification(
         .join("\n");
     })
     .join("\n");
-  const content = `## Code review complete${level}\n\n${findings}`;
+  let content = `## Code review complete${level}\n\n${findings}`;
+  if (coverage && missing.length > 0) {
+    content += `\n\n${partialCoverageLine(coverage)}`;
+  }
   return notification.instruction
     ? `${content}\n\n${notification.instruction}`
     : content;
@@ -251,6 +298,9 @@ export function deliverFailureNotification(
   );
 }
 
+/**
+ * Merge findings into the store and emit/refresh the rendered findings message.
+ */
 export function presentFindings(
   pi: ExtensionAPI,
   store: FindingsStore,
@@ -267,6 +317,7 @@ export function presentFindings(
       details: {
         level: store.level,
         findings: store.findings,
+        ...(store.coverage ? { coverage: store.coverage } : {}),
       } satisfies FindingsReport,
     },
     {},

@@ -24,7 +24,13 @@ export interface WorkflowCompletionDetails {
   name?: string;
   status: WorkflowStatus;
   elapsed: string;
-  agents: { total: number; done: number; failed: number };
+  agents: {
+    total: number;
+    done: number;
+    failed: number;
+    skipped?: number;
+    interrupted?: number;
+  };
   currentPhase?: string;
   artifactsDir: string;
 }
@@ -34,13 +40,19 @@ export function buildWorkflowCompletionDetails(
   details: WorkflowDetails,
   runDir: string,
 ): WorkflowCompletionDetails {
-  const { done, failed } = countStates(details);
+  const { done, failed, skipped, interrupted } = countStates(details);
   return {
     runId: details.runId,
     ...(details.name ? { name: details.name } : {}),
     status: details.status,
     elapsed: formatElapsed(details.startedAt, details.finishedAt),
-    agents: { total: details.agents.length, done, failed },
+    agents: {
+      total: details.agents.length,
+      done,
+      failed,
+      skipped,
+      interrupted,
+    },
     ...(details.currentPhase ? { currentPhase: details.currentPhase } : {}),
     artifactsDir: runDir,
   };
@@ -59,15 +71,22 @@ export const renderWorkflowCompletion: MessageRenderer<
   const content = typeof message.content === "string" ? message.content : "";
   const label = details.name ?? details.runId ?? "workflow";
   const total = details.agents?.total ?? 0;
+  const agentSummary = [`${total} agent${total === 1 ? "" : "s"}`];
+  if (details.agents?.failed)
+    agentSummary.push(`${details.agents.failed} failed`);
+  if (details.agents?.skipped)
+    agentSummary.push(`${details.agents.skipped} skipped`);
+  if (details.agents?.interrupted)
+    agentSummary.push(`${details.agents.interrupted} interrupted`);
   const header =
     theme.fg("accent", "✦ ") +
     theme.fg("toolTitle", theme.bold("workflow ")) +
     theme.fg("accent", label) +
     theme.fg(
       "muted",
-      ` · ${details.status ? statusWord(details.status) : "done"} · ${total} agent${
-        total === 1 ? "" : "s"
-      }${details.elapsed ? ` · ${details.elapsed}` : ""}`,
+      ` · ${details.status ? statusWord(details.status) : "done"} · ${agentSummary.join(
+        " · ",
+      )}${details.elapsed ? ` · ${details.elapsed}` : ""}`,
     );
 
   if (!expanded) {

@@ -402,8 +402,12 @@ export const LEVELS: Record<Effort, LevelConfig> = {
 // --- Prompt assembly ------------------------------------------------------
 
 function scopeSection(scope: ReviewScope): string {
+  const pin =
+    scope.rev && scope.treeSha && scope.rev !== scope.treeSha
+      ? `\nThe diff is from \`${scope.rev}\`. Files on disk are at \`${scope.treeSha}\` and can differ from the reviewed revision, so do not reason about this diff from the working tree. Read the reviewed revision instead: \`git show ${scope.rev}:<path>\`, plus \`git diff ${scope.rev} -- <path>\` for context. A finding or verdict that cites the on-disk copy may describe code this diff does not contain.\n`
+      : "";
   return `## Reviewing: ${scope.label} (${scope.changedLines} changed line(s))
-
+${pin}
 The unified diff under review:
 
 \`\`\`diff

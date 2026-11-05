@@ -88,6 +88,8 @@ export class RunController {
   private readonly tasks = new Set<Promise<unknown>>();
   private callCount = 0;
   private sealed = false;
+  private drained?: Promise<void>;
+  private readonly drainWaiters = new Set<() => void>();
   private parentAbort?: () => void;
   private parentSignal?: AbortSignal;
 
@@ -164,13 +166,32 @@ export class RunController {
     this.semaphore.clear();
   }
 
+  private whenTasksDrain(): Promise<void> {
+    if (!this.drained) {
+      const tasks = [...this.tasks];
+      this.drained = Promise.allSettled(tasks).then(() => {
+        this.detachParent();
+        for (const resolve of this.drainWaiters) resolve();
+        this.drainWaiters.clear();
+      });
+    }
+    return this.drained;
+  }
+
+  /** Resolves after settle has sealed and all registered tasks have exited. */
+  whenDrained(): Promise<void> {
+    if (this.drained) return this.drained;
+    if (this.sealed) return this.whenTasksDrain();
+    return new Promise((resolve) => this.drainWaiters.add(resolve));
+  }
+
   /** Seal the task registry and wait a bounded time for every task to settle. */
   async settle(options: { abort?: boolean; timeoutMs?: number } = {}) {
     this.sealed = true;
     if (options.abort) this.abort();
-    const tasks = [...this.tasks];
-    if (tasks.length === 0) {
-      this.detachParent();
+    const drained = this.whenTasksDrain();
+    if (this.tasks.size === 0) {
+      await drained;
       return true;
     }
 
@@ -182,10 +203,9 @@ export class RunController {
       );
       timer.unref?.();
     });
-    const settled = Promise.allSettled(tasks).then(() => true as const);
+    const settled = drained.then(() => true as const);
     const completed = await Promise.race([settled, timeout]);
     if (timer) clearTimeout(timer);
-    this.detachParent();
     return completed;
   }
 

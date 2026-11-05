@@ -3,8 +3,9 @@
  *
  * Expensive (a checkout per agent), so it is opt-in and only worth it when
  * agents mutate files concurrently and would otherwise collide. A worktree that
- * the agent left unchanged is removed automatically; one with changes is kept
- * and its path reported, so the work is never silently discarded.
+ * the agent left unchanged is removed automatically; one with uncommitted
+ * changes or new commits is kept and its path and branch reported, so the work
+ * is never silently discarded.
  */
 
 import { execFile } from "node:child_process";
@@ -25,11 +26,20 @@ async function git(cwd: string, ...gitArgs: string[]) {
   return stdout.trim();
 }
 
+export interface WorktreeRelease {
+  removed: boolean;
+  /** Uncommitted-file count, or -1 when the worktree could not be read. */
+  changedFiles: number;
+  /** Commits on the worktree branch since it was created. */
+  commits: number;
+  branch: string;
+}
+
 export interface Worktree {
   path: string;
   branch: string;
-  /** Removes the worktree when untouched; keeps and reports it when dirty. */
-  release(): Promise<{ removed: boolean; changedFiles: number }>;
+  /** Removes the worktree when untouched; keeps and reports it when changed. */
+  release(): Promise<WorktreeRelease>;
 }
 
 export async function isGitRepo(cwd: string): Promise<boolean> {
@@ -41,8 +51,8 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
 }
 
 /**
- * Creates a detached worktree at the current HEAD. `label` only decorates the
- * branch name; uniqueness comes from the caller-supplied run and agent ids.
+ * Creates a worktree on a new branch at the current HEAD. `label` only decorates
+ * the branch name; uniqueness comes from the caller-supplied run and agent ids.
  */
 export async function createWorktree(options: {
   cwd: string;
@@ -59,30 +69,30 @@ export async function createWorktree(options: {
     slug,
   );
 
-  await git(
-    repoRoot,
-    "worktree",
-    "add",
-    "--detach",
-    "-b",
-    branch,
-    worktreePath,
-    "HEAD",
-  );
+  await git(repoRoot, "worktree", "add", "-b", branch, worktreePath, "HEAD");
+  const baseCommit = await git(repoRoot, "rev-parse", "HEAD");
 
   return {
     path: worktreePath,
     branch,
     async release() {
       let changedFiles = 0;
+      let commits = 0;
       try {
         const status = await git(worktreePath, "status", "--porcelain");
         changedFiles = status ? status.split("\n").length : 0;
+        const head = await git(worktreePath, "rev-parse", "HEAD");
+        commits = Number(
+          await git(repoRoot, "rev-list", "--count", `${baseCommit}..${head}`),
+        );
       } catch {
-        // Treat an unreadable worktree as dirty and leave it in place.
-        return { removed: false, changedFiles: -1 };
+        // Treat an unreadable worktree as changed and leave it in place.
+        return { removed: false, changedFiles: -1, commits: 0, branch };
       }
-      if (changedFiles > 0) return { removed: false, changedFiles };
+      // A clean tree with a new commit is committed work, not an untouched
+      // worktree: keeping it is the whole point of the branch.
+      if (changedFiles > 0 || commits > 0)
+        return { removed: false, changedFiles, commits, branch };
       try {
         await git(repoRoot, "worktree", "remove", "--force", worktreePath);
         await git(repoRoot, "branch", "-D", branch);
@@ -91,9 +101,9 @@ export async function createWorktree(options: {
           force: true,
         });
       } catch {
-        return { removed: false, changedFiles: 0 };
+        return { removed: false, changedFiles: 0, commits: 0, branch };
       }
-      return { removed: true, changedFiles: 0 };
+      return { removed: true, changedFiles: 0, commits: 0, branch };
     },
   };
 }

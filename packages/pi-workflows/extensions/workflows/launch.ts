@@ -39,16 +39,21 @@ import {
   type DelegationConfig,
   type DelegationTier,
   type ResolvedDelegationTarget,
+  type SubagentModels,
 } from "../shared/subagent-models.ts";
-import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
+import {
+  createWorkflowHeartbeat,
+  createWorkflowPersistence,
+  persistWorkflowJson,
+  type WorkflowHeartbeat,
+} from "./artifacts.ts";
 import { loadDefaultBudget, WorkflowBudget } from "./budget.ts";
 import { buildWorkflowCompletionDetails } from "./completion.ts";
 import { DEFAULT_CONCURRENCY, RunController } from "./controller.ts";
 import {
   appendJournalEntry,
-  callKey,
   createResumePlan,
-  readJournal,
+  type JournalEntry,
 } from "./journal.ts";
 import { resolveModelOption } from "./model-aliases.ts";
 import { loadRegistrySettings } from "./registry.ts";
@@ -56,6 +61,7 @@ import {
   countStates,
   emptyUsage,
   type AgentRecord,
+  type AgentUsage,
   type WorkflowDetails,
 } from "./model.ts";
 import {
@@ -66,15 +72,24 @@ import {
 import {
   createWorkflowResources,
   runAgent,
+  type AgentOutcome,
+  type RunAgentOptions,
   type ThinkingLevel,
   type WorkflowModel,
 } from "./runner.ts";
-import { safeStringify, writeFileAtomic } from "./serialization.ts";
+import {
+  callKey,
+  legacyCallKey,
+  safeStringify,
+  writeFileAtomic,
+} from "./serialization.ts";
 import { createWorktree, isGitRepo } from "./worktree.ts";
 
 const PREVIEW_LENGTH = 200;
 const EMIT_INTERVAL_MS = 120;
 const MAX_FANOUT_ITEMS = 4096;
+/** Extra attempts after the first for an agent that keeps stalling. */
+export const MAX_STALL_RETRIES = 5;
 
 const THINKING_LEVELS = [
   "off",
@@ -102,6 +117,8 @@ interface AgentCallOptions {
   provider?: unknown;
   effort?: unknown;
   isolation?: unknown;
+  requireWork?: unknown;
+  stallMs?: unknown;
 }
 
 export function errorText(error: unknown): string {
@@ -121,9 +138,24 @@ function previewOf(result: unknown): string {
   return text.slice(0, PREVIEW_LENGTH);
 }
 
-/** The /subagent-model pi default, shared with subagent spawns. */
-function resolveDefaultAgentModel(ctx: ExtensionContext) {
-  const configured = loadSubagentModels().pi;
+/** Fold one attempt's usage into an agent's cumulative total. */
+function addUsage(total: AgentUsage, next: AgentUsage): void {
+  total.input += next.input;
+  total.output += next.output;
+  total.cacheRead += next.cacheRead;
+  total.cacheWrite += next.cacheWrite;
+  total.cost += next.cost;
+  total.turns += next.turns;
+  if (next.contextTokens !== undefined)
+    total.contextTokens = next.contextTokens;
+}
+
+/** The /subagents-menu pi default, shared with subagent spawns. */
+function resolveDefaultAgentModel(
+  ctx: ExtensionContext,
+  loadModels: () => SubagentModels,
+) {
+  const configured = loadModels().pi;
   return ctx.modelRegistry.find(configured.provider, configured.model);
 }
 
@@ -134,8 +166,8 @@ function affordableAgentModels(ctx: ExtensionContext) {
 }
 
 function summaryLine(details: WorkflowDetails): string {
-  const { done, failed } = countStates(details);
-  const settled = done + failed;
+  const { done, failed, skipped, interrupted } = countStates(details);
+  const settled = done + failed + skipped + interrupted;
   return `workflow ${details.name ?? details.runId}: ${settled}/${details.agents.length} agents${
     details.currentPhase ? ` · ${details.currentPhase}` : ""
   }`;
@@ -146,17 +178,19 @@ function writeRunFile(runDir: string, name: string, content: string) {
 }
 
 export function compactToolDetails(details: WorkflowDetails): WorkflowDetails {
-  return {
+  const compact: WorkflowDetails = {
     ...details,
-    ...(details.result !== undefined
-      ? {
-          result: JSON.parse(
-            safeStringify(details.result, { maxBytes: 64 * 1024 }),
-          ),
-        }
-      : {}),
     agents: details.agents.map((agent) => ({ ...agent, transcript: [] })),
   };
+  if (details.result !== undefined && !details.resultOmitted) {
+    compact.result = JSON.parse(
+      safeStringify(details.result, { maxBytes: 64 * 1024 }),
+    );
+  } else if (details.resultOmitted) {
+    // Never carry a lossy stand-in next to the omission marker.
+    delete compact.result;
+  }
+  return compact;
 }
 
 /** Mirrors sandbox-child.cjs mapLimited (bounded-concurrency map). */
@@ -252,6 +286,9 @@ async function inProcessPipeline(
 export interface ActiveRun {
   details: WorkflowDetails;
   controller: RunController;
+  stop(): void;
+  pause(): void;
+  skipAgent(index: number): boolean;
   completion?: Promise<void>;
 }
 
@@ -267,6 +304,8 @@ type ToolUpdate = {
 export interface InternalLaunchSpec<T> extends LaunchSpec<T> {
   /** Prior-run journal replay (the `workflow` tool's resume feature). */
   resumePlan?: ReturnType<typeof createResumePlan>;
+  /** Source run id when this launch resumes a prior run. */
+  resumeFromRunId?: string;
   /** Extra files written to the run dir (e.g. `script.js`, `args.json`). */
   extraArtifacts?: Record<string, string>;
   /** Abort source for a blocking run (the tool's execute signal). */
@@ -290,15 +329,24 @@ export interface LaunchDeps {
   createResources: typeof createWorkflowResources;
   /** Injectable delegation config for tests; defaults to the file-backed loader. */
   loadDelegationConfig?: () => DelegationConfig;
+  /** Injectable subagent-model config for tests; defaults to the file-backed loader. */
+  loadSubagentModels?: () => SubagentModels;
+  /** Settle deadline for the controller; tests use a short one. */
+  settleTimeoutMs?: number;
+  /** Injectable heartbeat factory for tests; defaults to the on-disk beat. */
+  startHeartbeat?: (runDir: string) => WorkflowHeartbeat;
+  /** Injectable journal writer for tests; defaults to appendJournalEntry. */
+  appendJournal?: (runDir: string, entry: JournalEntry) => boolean;
 }
 
 function toOutcome<T>(details: WorkflowDetails, runId: string): RunOutcome<T> {
   const status =
-    details.status === "completed"
-      ? "completed"
-      : details.status === "aborted"
-        ? "aborted"
-        : "failed";
+    details.status === "completed" ||
+    details.status === "aborted" ||
+    details.status === "paused" ||
+    details.status === "interrupted"
+      ? details.status
+      : "failed";
   return {
     status,
     result: details.result as T,
@@ -311,6 +359,10 @@ export function createLaunch(deps: LaunchDeps) {
   const { pi, activeRuns, updateIndicator, recordSettledRun, setLastUi } = deps;
   const readDelegationConfig =
     deps.loadDelegationConfig ?? loadDelegationConfig;
+  const readSubagentModels = deps.loadSubagentModels ?? loadSubagentModels;
+  const startHeartbeat =
+    deps.startHeartbeat ??
+    ((runDir: string) => createWorkflowHeartbeat(runDir));
 
   return function launch<T>(
     spec: InternalLaunchSpec<T>,
@@ -331,6 +383,9 @@ export function createLaunch(deps: LaunchDeps) {
 
     const details: WorkflowDetails = {
       runId,
+      ...(spec.resumeFromRunId
+        ? { resumedFromRunId: spec.resumeFromRunId }
+        : {}),
       sessionId: ctx.sessionManager.getSessionId(),
       name: meta.name,
       description: meta.description,
@@ -339,16 +394,29 @@ export function createLaunch(deps: LaunchDeps) {
       startedAt: Date.now(),
       phases: [...meta.phases],
       agents: [],
+      resumable: true,
     };
 
     for (const [name, content] of Object.entries(spec.extraArtifacts ?? {}))
       writeRunFile(runDir, name, content);
     persistWorkflowJson(runDir, details);
     const persistence = createWorkflowPersistence(runDir, details);
+    const writeJournal = deps.appendJournal ?? appendJournalEntry;
+    const appendJournal = (entry: JournalEntry) => {
+      if (writeJournal(runDir, entry)) return true;
+      details.resumable = false;
+      details.resumeError = "Workflow journal could not be written completely";
+      persistence.checkpoint({ immediate: true });
+      return false;
+    };
 
     // Background runs survive Esc on the parent turn, but all runs are aborted
     // and settled during session shutdown.
     const controller = new RunController(background ? undefined : spec.signal);
+
+    let controlRequest: "stop" | "pause" | undefined;
+    const agentAbortControllers = new Map<number, AbortController>();
+    const repeatedStopHandlers = new Map<number, () => void>();
 
     // Each concurrent child gets its own extension runtime. All children use
     // the parent cwd and live trust decision.
@@ -400,6 +468,7 @@ export function createLaunch(deps: LaunchDeps) {
     };
 
     let agentCounter = 0;
+    let previousCallKey: string | undefined;
     const agentFn = async (
       promptValue: unknown,
       optsValue: unknown = {},
@@ -424,10 +493,20 @@ export function createLaunch(deps: LaunchDeps) {
           ? promptValue
           : String(promptValue ?? ""),
       );
-      const key = callKey(prompt, opts);
+      let key: string;
+      try {
+        key = callKey(prompt, opts, previousCallKey);
+      } catch (error) {
+        details.resumable = false;
+        details.resumeError = errorText(error);
+        persistence.checkpoint({ immediate: true });
+        throw error;
+      }
+      previousCallKey = key;
+      const oldKey = legacyCallKey(prompt, opts);
 
-      // Replay serves the unchanged prefix without spending a slot or a call.
-      const cached = resumePlan.take(index - 1, key);
+      // Replay serves only complete results from an unchanged call prefix.
+      const cached = resumePlan.take(index - 1, key, oldKey);
       if (cached) {
         const result = cached.result;
         const now = Date.now();
@@ -435,7 +514,7 @@ export function createLaunch(deps: LaunchDeps) {
           index,
           label,
           ...(phase ? { phase } : {}),
-          state: result === null ? "error" : "done",
+          state: "done",
           startedAt: now,
           finishedAt: now,
           cached: true,
@@ -443,13 +522,16 @@ export function createLaunch(deps: LaunchDeps) {
           usage: emptyUsage(),
           transcript: [],
         });
-        appendJournalEntry(runDir, {
+        const base = {
+          version: 2 as const,
           index: index - 1,
           key,
           label,
           ...(phase ? { phase } : {}),
-          result,
-        });
+          attempt: 1,
+        };
+        appendJournal({ ...base, type: "started" });
+        appendJournal({ ...base, type: "result", result });
         persistence.checkpoint({ immediate: true });
         emit(false);
         return result;
@@ -497,15 +579,28 @@ export function createLaunch(deps: LaunchDeps) {
         if (tier === undefined && hasExplicitTarget) {
           // Default to the configured subagent model, not the parent
           // session's, so fan-out does not run expensive interactive models.
-          const defaultModel = resolveDefaultAgentModel(ctx);
-          if (!defaultModel) {
-            const configured = loadSubagentModels().pi;
-            return reject(
-              `agent "${label}": default subagent model "${configured.provider}/${configured.model}" is not available. Run /subagent-model to pick another.`,
+          const withDefaultModel = (): AgentTarget | undefined => {
+            const defaultModel = resolveDefaultAgentModel(
+              ctx,
+              readSubagentModels,
             );
-          }
-          model = defaultModel;
-          if (opts.model !== undefined || opts.provider !== undefined) {
+            if (defaultModel) {
+              model = defaultModel;
+              return undefined;
+            }
+            const configured = readSubagentModels().pi;
+            return reject(
+              `agent "${label}": default subagent model "${configured.provider}/${configured.model}" is not available. Run /subagents-menu to pick another.`,
+            );
+          };
+          // An explicit model or provider stands on its own: the configured
+          // default is only a fallback for an effort-only override or an
+          // unmapped CC alias, so an unavailable default cannot sink a call
+          // that named its own target.
+          if (opts.model === undefined && opts.provider === undefined) {
+            const failure = withDefaultModel();
+            if (failure) return failure;
+          } else {
             const modelOpt =
               typeof opts.model === "string" ? opts.model : undefined;
             const providerOpt =
@@ -542,10 +637,14 @@ export function createLaunch(deps: LaunchDeps) {
                 );
               }
               model = resolution.model;
+            } else if (resolution.kind === "alias") {
+              // User-configured intent — no cost ceiling.
+              model = resolution.model;
+              requestedModel = resolution.alias;
             } else {
-              // "alias": user-configured intent — no cost ceiling. "default":
-              // known CC alias with no mapping — keep the subagent default.
-              if (resolution.kind === "alias") model = resolution.model;
+              // Known CC alias with no mapping — keep the subagent default.
+              const failure = withDefaultModel();
+              if (failure) return failure;
               requestedModel = resolution.alias;
             }
           }
@@ -579,7 +678,7 @@ export function createLaunch(deps: LaunchDeps) {
           const found = ctx.modelRegistry.find(provider, resolved.model);
           if (!found)
             return reject(
-              `agent "${label}": tier "${resolved.source.kind === "tier" ? resolved.source.tier : "explicit"}" model "${provider}/${resolved.model}" is not available. Run /subagent-model to pick another.`,
+              `agent "${label}": tier "${resolved.source.kind === "tier" ? resolved.source.tier : "explicit"}" model "${provider}/${resolved.model}" is not available. Run /subagents-menu to pick another.`,
             );
           model = found;
           thinkingLevel = resolved.effort as ThinkingLevel;
@@ -615,37 +714,89 @@ export function createLaunch(deps: LaunchDeps) {
       persistence.checkpoint({ immediate: true });
       emit(false);
 
-      const journal = (result: ScriptAgentResult) => {
-        appendJournalEntry(runDir, {
-          index: index - 1,
-          key,
-          label,
-          ...(phase ? { phase } : {}),
-          result,
+      const journalBase = (attempt: number) => ({
+        version: 2 as const,
+        index: index - 1,
+        key,
+        label,
+        ...(phase ? { phase } : {}),
+        attempt,
+      });
+      const startAttempt = (attempt: number) =>
+        appendJournal({ ...journalBase(attempt), type: "started" });
+      const failAttempt = (
+        attempt: number,
+        error: string,
+        failureKind: "stall" | "aborted" | "error" = "error",
+        skipped = false,
+      ) =>
+        appendJournal({
+          ...journalBase(attempt),
+          type: "failed",
+          error,
+          failureKind,
+          ...(skipped ? { skipped: true as const } : {}),
         });
-        return result;
-      };
+      const recordResult = (attempt: number, result: unknown) =>
+        result === null || result === undefined
+          ? failAttempt(attempt, "Agent returned no result")
+          : appendJournal({ ...journalBase(attempt), type: "result", result });
 
-      // A failed agent resolves to null; the reason lives on the run record and
-      // in the completion report, not in the caller's value.
-      const fail = (error: string): ScriptAgentResult => {
-        record.state = "error";
+      record.attempts = 1;
+      startAttempt(1);
+      const finishAgent = (
+        state: AgentRecord["state"],
+        error: string,
+      ): ScriptAgentResult => {
+        record.state = state;
         record.error = error;
         record.finishedAt = Date.now();
+        failAttempt(
+          record.attempts ?? 1,
+          error,
+          state === "interrupted" || state === "skipped" ? "aborted" : "error",
+          state === "skipped",
+        );
         emit();
-        return journal(null);
+        return null;
       };
+      const fail = (error: string) => finishAgent("error", error);
 
       // A hard ceiling: this rejection surfaces as a throw inside the script.
-      budget.assertAvailable();
+      try {
+        budget.assertAvailable();
+      } catch (error) {
+        finishAgent("error", errorText(error));
+        throw error;
+      }
 
       if (!prompt.trim())
         return fail("agent() requires a non-empty prompt string");
       if (controller.signal.aborted)
-        return fail("Workflow was aborted before this agent started");
+        return finishAgent(
+          "interrupted",
+          "Run stopped before this agent started",
+        );
       if (!target.ok) return fail(target.error);
 
+      const stallMs = opts.stallMs;
+      if (
+        stallMs !== undefined &&
+        (typeof stallMs !== "number" ||
+          !Number.isFinite(stallMs) ||
+          stallMs <= 0)
+      ) {
+        return fail(
+          `agent "${label}": stallMs must be a positive number of milliseconds`,
+        );
+      }
+
       const { model, thinkingLevel } = target;
+      const skipController = new AbortController();
+      agentAbortControllers.set(index, skipController);
+      const taskInvocationSignal = invocationSignal
+        ? AbortSignal.any([invocationSignal, skipController.signal])
+        : skipController.signal;
 
       return controller
         .schedule(async (runSignal) => {
@@ -674,7 +825,7 @@ export function createLaunch(deps: LaunchDeps) {
           }
 
           const resources = await getResources(opts.schema !== undefined);
-          const outcome = await deps.runAgent({
+          const runOptions: RunAgentOptions = {
             prompt,
             schema: opts.schema,
             model,
@@ -684,6 +835,15 @@ export function createLaunch(deps: LaunchDeps) {
             settingsManager: resources.settingsManager,
             modelRegistry: ctx.modelRegistry,
             signal: runSignal,
+            ...(opts.requireWork === true ? { requireWork: true } : {}),
+            ...(stallMs !== undefined ? { stallTimeoutMs: stallMs } : {}),
+            registerRepeatedStop: (resignal) => {
+              repeatedStopHandlers.set(index, resignal);
+              return () => {
+                if (repeatedStopHandlers.get(index) === resignal)
+                  repeatedStopHandlers.delete(index);
+              };
+            },
             onProgress: (progress) => {
               record.preview = progress.preview.slice(0, PREVIEW_LENGTH);
               record.usage = progress.usage;
@@ -693,18 +853,58 @@ export function createLaunch(deps: LaunchDeps) {
               record.transcript = progress.transcript;
               emit();
             },
-          });
+          };
 
+          // A stalled attempt is retried serially, up to five times after the
+          // first. runAgent awaits its child's shutdown, so the next attempt
+          // cannot start before the previous one has exited.
+          let outcome: AgentOutcome;
+          let attempts = 0;
+          const totalUsage = emptyUsage();
+          do {
+            attempts += 1;
+            record.attempts = attempts;
+            if (attempts > 1) startAttempt(attempts);
+            outcome = await deps.runAgent(runOptions);
+            addUsage(totalUsage, outcome.usage);
+            budget.add(outcome.usage.output);
+            if (!outcome.ok) {
+              const skipped = skipController.signal.aborted;
+              failAttempt(
+                attempts,
+                skipped ? "Skipped by user" : (outcome.error ?? "Agent failed"),
+                skipped
+                  ? "aborted"
+                  : (outcome.failureKind ??
+                      (outcome.aborted ? "aborted" : "error")),
+                skipped,
+              );
+            }
+          } while (
+            !outcome.ok &&
+            outcome.failureKind === "stall" &&
+            attempts <= MAX_STALL_RETRIES &&
+            !runSignal.aborted
+          );
           if (worktree) {
             const released = await worktree.release();
             if (released.removed) delete record.worktree;
-            else
+            else {
+              const parts: string[] = [];
+              if (released.changedFiles < 0) parts.push("unreadable");
+              else {
+                if (released.commits > 0)
+                  parts.push(`${released.commits} new commit(s)`);
+                if (released.changedFiles > 0)
+                  parts.push(`${released.changedFiles} changed file(s)`);
+                if (parts.length === 0) parts.push("no file changes");
+              }
               logFn(
-                `${label}: worktree kept at ${worktree.path} (${released.changedFiles < 0 ? "unreadable" : `${released.changedFiles} changed file(s)`})`,
+                `${label}: worktree kept on branch ${released.branch} at ${worktree.path} (${parts.join(", ")})`,
               );
+            }
           }
-          record.usage = outcome.usage;
-          budget.add(outcome.usage.output);
+          record.usage = totalUsage;
           record.model = outcome.model ?? record.model;
           record.contextWindow = outcome.contextWindow ?? record.contextWindow;
           record.transcript = outcome.transcript;
@@ -713,20 +913,43 @@ export function createLaunch(deps: LaunchDeps) {
             PREVIEW_LENGTH,
           );
           record.finishedAt = Date.now();
-          record.state = outcome.ok ? "done" : "error";
           if (outcome.ok) {
+            record.state = "done";
             delete record.error;
+          } else if (skipController.signal.aborted) {
+            record.state = "skipped";
+            record.error = "Skipped by user";
+          } else if (
+            outcome.aborted ||
+            outcome.failureKind === "aborted" ||
+            runSignal.aborted ||
+            controller.signal.aborted
+          ) {
+            record.state = "interrupted";
+            record.error =
+              outcome.error ?? "Run stopped before this agent settled";
           } else {
+            record.state = "error";
             record.error = outcome.error ?? "Agent failed";
           }
           emit();
 
-          if (!outcome.ok) return journal(null);
-          return journal(
-            opts.schema !== undefined ? outcome.structured : outcome.output,
-          );
-        }, invocationSignal)
-        .catch((error) => fail(errorText(error)));
+          if (record.state !== "done") return null;
+          const result =
+            opts.schema !== undefined ? outcome.structured : outcome.output;
+          recordResult(attempts, result);
+          return result;
+        }, taskInvocationSignal)
+        .catch((error) => {
+          if (record.state === "skipped" || record.state === "interrupted")
+            return null;
+          if (skipController.signal.aborted)
+            return finishAgent("skipped", "Skipped by user");
+          if (controller.signal.aborted || invocationSignal?.aborted)
+            return finishAgent("interrupted", errorText(error));
+          return fail(errorText(error));
+        })
+        .finally(() => agentAbortControllers.delete(index));
     };
 
     const budgetView: OrchestrationDSL["budget"] = {
@@ -735,6 +958,33 @@ export function createLaunch(deps: LaunchDeps) {
       },
       spent: () => budget.spent(),
       remaining: () => budget.remaining(),
+    };
+
+    const requestControl = (control: "stop" | "pause") => {
+      if (details.status !== "running" && details.status !== "stopping") return;
+      if (controlRequest === "stop" && control === "pause") return;
+      const repeatedStop = control === "stop" && controller.signal.aborted;
+      controlRequest = control;
+      details.status = "stopping";
+      details.finishedAt = undefined;
+      delete details.error;
+      persistence.checkpoint({ immediate: true });
+      emit(false);
+      controller.abort(
+        control === "pause"
+          ? "Workflow paused by user"
+          : "Workflow stopped by user",
+      );
+      if (repeatedStop) {
+        for (const resignal of repeatedStopHandlers.values()) {
+          try {
+            resignal();
+          } catch {
+            // A child that already disposed cannot accept another abort.
+          }
+        }
+      }
+      updateIndicator();
     };
 
     const dsl: OrchestrationDSL = {
@@ -754,26 +1004,53 @@ export function createLaunch(deps: LaunchDeps) {
       try {
         details.result = await spec.orchestrate(dsl);
       } catch (error) {
-        details.error = errorText(error);
-        status = controller.signal.aborted ? "aborted" : "failed";
-        controller.abort("Workflow orchestration failed");
+        if (!controlRequest) details.error = errorText(error);
+        status = controlRequest
+          ? controlRequest === "pause"
+            ? "paused"
+            : "aborted"
+          : controller.signal.aborted
+            ? "aborted"
+            : "failed";
+        if (!controlRequest) controller.abort("Workflow orchestration failed");
       }
+      if (controlRequest)
+        status = controlRequest === "pause" ? "paused" : "aborted";
+      else if (controller.signal.aborted && status === "completed")
+        status = "aborted";
 
       const settled = await controller.settle({
-        abort: status !== "completed",
+        abort: status !== "completed" || controller.signal.aborted,
+        timeoutMs: deps.settleTimeoutMs,
       });
       if (!settled) {
-        status = "failed";
-        details.error = details.error
-          ? `${details.error}; agent shutdown deadline exceeded`
-          : "Agent shutdown deadline exceeded";
+        if (!controlRequest) {
+          status = "failed";
+          details.error = details.error
+            ? `${details.error}; agent shutdown deadline exceeded`
+            : "Agent shutdown deadline exceeded";
+          controller.abort("Agent shutdown deadline exceeded");
+        }
+        details.status = "stopping";
+        details.finishedAt = undefined;
+        persistence.checkpoint({ immediate: true });
+        emit(false);
+        updateIndicator();
+        await controller.whenDrained();
+        if (controlRequest)
+          status = controlRequest === "pause" ? "paused" : "aborted";
       }
-      for (const record of details.agents) {
-        if (record.state !== "running") continue;
-        record.state = "error";
-        record.error =
-          record.error ?? "Agent did not settle before run cleanup";
-        record.finishedAt = Date.now();
+      const { failed } = countStates(details);
+      if (
+        status === "completed" &&
+        details.agents.length > 0 &&
+        failed === details.agents.length
+      ) {
+        const firstError = details.agents.find(
+          (agent) => agent.state === "error",
+        )?.error;
+        details.error = `All ${failed} agents failed${firstError ? `: ${firstError}` : ""}`;
+        status = "failed";
       }
       details.status = status;
       details.finishedAt = Date.now();
@@ -790,7 +1067,27 @@ export function createLaunch(deps: LaunchDeps) {
 
     // Registered for /workflows visibility and session_shutdown abort; blocking
     // runs are watchable live from the dashboard too.
-    const activeRun: ActiveRun = { details, controller };
+    const heartbeat = startHeartbeat(runDir);
+    const activeRun: ActiveRun = {
+      details,
+      controller,
+      stop: () => requestControl("stop"),
+      pause: () => requestControl("pause"),
+      skipAgent: (index) => {
+        const record = details.agents.find((agent) => agent.index === index);
+        const abortController = agentAbortControllers.get(index);
+        if (
+          details.status !== "running" ||
+          record?.state !== "running" ||
+          !abortController ||
+          abortController.signal.aborted
+        ) {
+          return false;
+        }
+        abortController.abort(new Error("Agent skipped by user"));
+        return true;
+      },
+    };
     activeRuns.set(runId, activeRun);
     const completion = runScript();
     activeRun.completion = completion;
@@ -798,6 +1095,18 @@ export function createLaunch(deps: LaunchDeps) {
     updateIndicator();
 
     const sendFollowUp = delivery === "model-followup" && background;
+    const reportPath = path.join(runDir, "report.md");
+
+    // Record a rejection instead of retrying: a resend can duplicate a
+    // follow-up the session may already have accepted.
+    const persistDeliveryFailure = (error: unknown) => {
+      details.deliveryFailure = { error: errorText(error), reportPath };
+      try {
+        persistence.flush();
+      } catch {
+        // Keep the failure visible in memory if the artifact is read-only.
+      }
+    };
 
     const settledPromise = new Promise<RunOutcome<T>>((resolve) => {
       void completion
@@ -807,12 +1116,26 @@ export function createLaunch(deps: LaunchDeps) {
           details.error = details.error ?? errorText(error);
         })
         .finally(() => {
+          heartbeat.stop();
           activeRuns.delete(runId);
           recordSettledRun(details.status);
           updateIndicator();
+          try {
+            writeFileAtomic(
+              reportPath,
+              buildWorkflowResultMessage(details, runDir),
+            );
+          } catch {
+            // A read-only run dir must not fail delivery or settlement.
+          }
           if (sendFollowUp) {
             try {
-              pi.sendMessage(
+              const sent = (
+                pi.sendMessage as unknown as (
+                  message: unknown,
+                  options: unknown,
+                ) => unknown
+              )(
                 {
                   customType: "workflow-completion",
                   display: true,
@@ -827,8 +1150,16 @@ export function createLaunch(deps: LaunchDeps) {
                 },
                 { deliverAs: "followUp", triggerTurn: true },
               );
-            } catch {
-              // Session may be shutting down.
+              // A late rejection is recorded but never retried; the run must
+              // not wait on a follow-up turn to settle.
+              if (
+                sent &&
+                typeof (sent as Promise<unknown>).then === "function"
+              ) {
+                void Promise.resolve(sent).catch(persistDeliveryFailure);
+              }
+            } catch (error) {
+              persistDeliveryFailure(error);
             }
           }
           resolve(toOutcome<T>(details, runId));

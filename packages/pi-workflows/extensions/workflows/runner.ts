@@ -65,6 +65,22 @@ export interface ToolExecutionTiming {
   durationMs?: number;
 }
 
+export type AgentFailureKind = "stall" | "aborted" | "error";
+
+/**
+ * Classify a failed attempt. A run abort outranks a stall so an attempt cut off
+ * by a stop is never retried; a stall is retryable; everything else (provider
+ * errors, malformed output) is a plain error.
+ */
+export function agentFailureKind(state: {
+  stalled?: boolean;
+  aborted?: boolean;
+}): AgentFailureKind {
+  if (state.aborted) return "aborted";
+  if (state.stalled) return "stall";
+  return "error";
+}
+
 export interface AgentOutcome {
   ok: boolean;
   /** Final assistant text (may be empty when only structured output was produced). */
@@ -73,10 +89,14 @@ export interface AgentOutcome {
   structured?: unknown;
   error?: string;
   aborted: boolean;
+  /** Why a failed attempt failed; only `stall` is retried automatically. */
+  failureKind?: AgentFailureKind;
   usage: AgentUsage;
   model?: string;
   contextWindow?: number;
   transcript: TranscriptEntry[];
+  /** Tool calls made other than the one-shot structured_output call, errored ones excluded. */
+  toolCalls: number;
 }
 
 export interface AgentProgress {
@@ -104,6 +124,15 @@ export interface RunAgentOptions {
   firstResponseTimeoutMs?: number;
   /** Test-only override for the mid-run no-progress timeout. */
   stallTimeoutMs?: number;
+  /** Test-only seam: override the child session factory. */
+  createSession?: typeof createAgentSession;
+  /** Register a callback used to re-abort the child after a repeated run stop. */
+  registerRepeatedStop?: (resignal: () => void) => () => void;
+  /**
+   * Fail the agent when it settles with an empty result and no work: zero tool
+   * calls other than `structured_output`.
+   */
+  requireWork?: boolean;
 }
 
 /** Build a fresh extension runtime for each concurrent workflow child. */
@@ -397,6 +426,56 @@ function errorText(error: unknown): string {
   );
 }
 
+/**
+ * Tool calls in the transcript other than the one-shot structured_output call.
+ * A call whose result came back as an error is not counted: it did not work.
+ */
+export function countToolCalls(transcript: TranscriptEntry[]): number {
+  const errored = new Set(
+    transcript
+      .filter((entry) => entry.role === "toolResult" && entry.isError === true)
+      .map((entry) => entry.toolCallId)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  return transcript.filter(
+    (entry) =>
+      entry.role === "tool" &&
+      entry.name !== "structured_output" &&
+      !(typeof entry.toolCallId === "string" && errored.has(entry.toolCallId)),
+  ).length;
+}
+
+/**
+ * Empty by the `requireWork` rule: null/undefined, a blank string, an empty
+ * array, or a plain object whose own values are all empty by this same rule.
+ */
+function isEmptyResult(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.trim() === "";
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value !== "object") return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.values(value).every(isEmptyResult);
+}
+
+/**
+ * The settle error for a `requireWork` agent: an empty result with no tool
+ * calls other than `structured_output` means it never did the requested work.
+ * `result` is what the agent produced, so a text agent is judged on its output
+ * rather than on a structured value it was never asked for.
+ */
+export function emptyResultWithoutWorkError(
+  result: unknown,
+  toolCalls: number,
+  requireWork?: boolean,
+): string | undefined {
+  if (requireWork !== true) return undefined;
+  if (toolCalls > 0) return undefined;
+  if (!isEmptyResult(result)) return undefined;
+  return "Agent returned an empty result without doing any work";
+}
+
 function formatTimeout(timeoutMs: number) {
   return timeoutMs % 1_000 === 0
     ? `${timeoutMs / 1_000} seconds`
@@ -497,6 +576,7 @@ function isAssistantResponseEvent(event: AgentSessionEvent) {
 export async function runAgent(
   options: RunAgentOptions,
 ): Promise<AgentOutcome> {
+  const createSession = options.createSession ?? createAgentSession;
   let structured: unknown;
   let customTools: ToolDefinition[] | undefined;
   let session: AgentSession | undefined;
@@ -510,7 +590,7 @@ export async function runAgent(
             }),
           ]
         : undefined;
-    ({ session } = await createAgentSession({
+    ({ session } = await createSession({
       cwd: options.cwd,
       ...(options.model ? { model: options.model } : {}),
       ...(options.thinkingLevel
@@ -535,14 +615,20 @@ export async function runAgent(
       output: "",
       error: `Failed to create agent session: ${errorText(error)}`,
       aborted: false,
+      failureKind: "error",
       usage: emptyUsage(),
       model: options.model?.id,
       contextWindow: options.model?.contextWindow,
       transcript: [],
+      toolCalls: 0,
     };
   }
 
   const childSession = session;
+  const unregisterRepeatedStop =
+    options.registerRepeatedStop?.(() => {
+      void childSession.abort().catch(() => {});
+    }) ?? (() => {});
   let usage = emptyUsage();
   let reportedCost = 0;
   let modelId = childSession.model?.id ?? options.model?.id;
@@ -605,10 +691,13 @@ export async function runAgent(
   };
 
   let markFirstResponse = () => {};
+  /** Set when a watchdog cuts the attempt off, so the outcome says why. */
+  let stalled = false;
   /** Set when we abort deliberately, so the outcome says why. */
   let terminationReason: string | undefined;
   const stall = createStallWatchdog(
     (message) => {
+      stalled = true;
       terminationReason ??= message;
       void childSession.abort().catch(() => {});
     },
@@ -667,12 +756,19 @@ export async function runAgent(
 
   let output = "";
   let transcript: TranscriptEntry[] = [];
+  let toolCalls = 0;
   try {
     if (!aborted) {
-      const watchdog = createFirstResponseWatchdog(() => childSession.abort(), {
-        timeoutMs: options.firstResponseTimeoutMs,
-        model: modelId,
-      });
+      const watchdog = createFirstResponseWatchdog(
+        () => {
+          stalled = true;
+          return childSession.abort();
+        },
+        {
+          timeoutMs: options.firstResponseTimeoutMs,
+          model: modelId,
+        },
+      );
       markFirstResponse = watchdog.markResponse;
       await watchdog.waitFor(
         childSession.prompt(buildWorkflowAgentPrompt(options.prompt)),
@@ -693,7 +789,12 @@ export async function runAgent(
       AGENT_OUTPUT_MAX_BYTES,
     );
     transcript = transcriptFromMessages(childSession.messages, toolTimings);
-    await shutdownAndDisposeChildSession(childSession);
+    toolCalls = countToolCalls(transcript);
+    try {
+      await shutdownAndDisposeChildSession(childSession);
+    } finally {
+      unregisterRepeatedStop();
+    }
   }
 
   if (terminationReason !== undefined) {
@@ -703,24 +804,46 @@ export async function runAgent(
       structured,
       error: terminationReason,
       aborted: false,
+      failureKind: agentFailureKind({ stalled }),
       usage,
       model: modelId,
       contextWindow,
       transcript,
+      toolCalls,
     };
   }
 
-  if (aborted || stopReason === "aborted") {
+  if (aborted || (stopReason === "aborted" && !stalled)) {
     return {
       ok: false,
       output,
       structured,
       error: "Agent was aborted",
       aborted: true,
+      failureKind: agentFailureKind({ aborted: true }),
       usage,
       model: modelId,
       contextWindow,
       transcript,
+      toolCalls,
+    };
+  }
+
+  // A first-response timeout aborts the child, which can stamp the message
+  // stopReason="aborted"; the stall flag still wins so the attempt is retried.
+  if (stalled) {
+    return {
+      ok: false,
+      output,
+      structured,
+      error: errorMessage ?? "Agent stalled before completing",
+      aborted: false,
+      failureKind: agentFailureKind({ stalled: true }),
+      usage,
+      model: modelId,
+      contextWindow,
+      transcript,
+      toolCalls,
     };
   }
 
@@ -731,6 +854,26 @@ export async function runAgent(
   // the loop ended cleanly (terminate:true). Salvage the result instead of
   // discarding it.
   if (options.schema !== undefined && structured !== undefined) {
+    const noWork = emptyResultWithoutWorkError(
+      structured,
+      toolCalls,
+      options.requireWork,
+    );
+    if (noWork !== undefined) {
+      return {
+        ok: false,
+        output,
+        structured,
+        error: noWork,
+        aborted: false,
+        failureKind: "error",
+        usage,
+        model: modelId,
+        contextWindow,
+        transcript,
+        toolCalls,
+      };
+    }
     return {
       ok: true,
       output,
@@ -740,6 +883,7 @@ export async function runAgent(
       model: modelId,
       contextWindow,
       transcript,
+      toolCalls,
     };
   }
 
@@ -751,10 +895,12 @@ export async function runAgent(
       structured,
       error: errorMessage ?? "Agent failed",
       aborted: false,
+      failureKind: agentFailureKind({ stalled }),
       usage,
       model: modelId,
       contextWindow,
       transcript,
+      toolCalls,
     };
   }
 
@@ -765,10 +911,33 @@ export async function runAgent(
       error:
         "Agent finished without calling structured_output; no structured result matching the schema was produced.",
       aborted: false,
+      failureKind: "error",
       usage,
       model: modelId,
       contextWindow,
       transcript,
+      toolCalls,
+    };
+  }
+
+  const noWork = emptyResultWithoutWorkError(
+    options.schema !== undefined ? structured : output,
+    toolCalls,
+    options.requireWork,
+  );
+  if (noWork !== undefined) {
+    return {
+      ok: false,
+      output,
+      structured,
+      error: noWork,
+      aborted: false,
+      failureKind: "error",
+      usage,
+      model: modelId,
+      contextWindow,
+      transcript,
+      toolCalls,
     };
   }
 
@@ -781,5 +950,6 @@ export async function runAgent(
     model: modelId,
     contextWindow,
     transcript,
+    toolCalls,
   };
 }

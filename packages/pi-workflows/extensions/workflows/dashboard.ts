@@ -26,13 +26,17 @@ import {
   wrapTextWithAnsi,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { hydrateWorkflowResult, isRunLiveFromDisk } from "./artifacts.ts";
+import { writeFileAtomic } from "./serialization.ts";
 import {
   agentContext,
   agentModelLabel,
+  agentStateWord,
   countStates,
   formatElapsed,
   formatUsage,
   aggregateUsage,
+  normalizeTranscript,
   phaseGroups,
   resultJson,
   shortenHome,
@@ -60,38 +64,101 @@ export interface RunEntry {
   runId: string;
   details: WorkflowDetails;
   live: boolean;
+  resumable: boolean;
+  resumeActive: boolean;
+}
+
+export interface WorkflowDashboardControls {
+  stop(runId: string): void;
+  pause(runId: string): void;
+  skipAgent(runId: string, index: number): boolean;
+  retryAgent(runId: string, index: number): boolean;
+  resume(runId: string): Promise<void>;
+}
+
+export type WorkflowControlAction =
+  | { action: "stop"; runId: string }
+  | { action: "pause"; runId: string }
+  | { action: "skipAgent"; runId: string; index: number }
+  | { action: "retryAgent"; runId: string; index: number }
+  | { action: "resume"; runId: string };
+
+export function resolveWorkflowControlAction(selection: {
+  key: string;
+  run?: RunEntry;
+  agent?: AgentRecord;
+  focus?: "run" | "agent";
+}): WorkflowControlAction | undefined {
+  const { key, run, agent, focus = "run" } = selection;
+  if (!run) return undefined;
+  const { runId, details, live } = run;
+  if (key === "x") {
+    if (focus === "agent") {
+      return live && details.status === "running" && agent?.state === "running"
+        ? { action: "skipAgent", runId, index: agent.index }
+        : undefined;
+    }
+    return live &&
+      (details.status === "running" || details.status === "stopping")
+      ? { action: "stop", runId }
+      : undefined;
+  }
+  if (key === "p") {
+    return focus === "run" && live && details.status === "running"
+      ? { action: "pause", runId }
+      : undefined;
+  }
+  if (key === "r") {
+    if (focus === "agent") {
+      return !live &&
+        run.resumable &&
+        !run.resumeActive &&
+        agent &&
+        (agent.state === "error" ||
+          agent.state === "skipped" ||
+          agent.state === "interrupted")
+        ? { action: "retryAgent", runId, index: agent.index }
+        : undefined;
+    }
+    return !live &&
+      run.resumable &&
+      !run.resumeActive &&
+      (details.status === "paused" || details.status === "interrupted")
+      ? { action: "resume", runId }
+      : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Why a run cannot be resumed: the journal was not written completely, or the
+ * run has no saved script. Undefined when the run can be resumed, or when a
+ * live replay of it is the only thing blocking a resume. A live run still gets
+ * a reason: it is running now and will not be resumable once it settles.
+ */
+export function resumeUnavailableReason(run: RunEntry): string | undefined {
+  if (run.resumeActive) return undefined;
+  if (run.details.resumable === false)
+    return run.details.resumeError ?? "journal is non-resumable";
+  if (!run.resumable) return "no saved script to resume from";
+  return undefined;
+}
+
+/** Explains a refused `r` press instead of letting the key fall through. */
+export function resolveWorkflowControlNotice(selection: {
+  key: string;
+  run?: RunEntry;
+  focus?: "run" | "agent";
+}): string | undefined {
+  const { key, run, focus = "run" } = selection;
+  if (key !== "r" || focus !== "run" || !run) return undefined;
+  if (run.live) return undefined;
+  const reason = resumeUnavailableReason(run);
+  return reason ? `cannot resume: ${reason}` : undefined;
 }
 
 function runsDir(): string {
   return path.join(getAgentDir(), "workflows");
-}
-
-function normalizeTranscript(value: unknown): TranscriptEntry[] {
-  if (!Array.isArray(value)) return [];
-  const transcript: TranscriptEntry[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-    const entry = item as Record<string, unknown>;
-    if (
-      entry.role !== "user" &&
-      entry.role !== "assistant" &&
-      entry.role !== "thinking" &&
-      entry.role !== "tool" &&
-      entry.role !== "toolResult"
-    ) {
-      continue;
-    }
-    if (typeof entry.text !== "string") continue;
-    transcript.push({
-      role: entry.role,
-      text: entry.text,
-      name: typeof entry.name === "string" ? entry.name : undefined,
-      isError: entry.isError === true,
-      timestamp:
-        typeof entry.timestamp === "number" ? entry.timestamp : undefined,
-    });
-  }
-  return transcript;
 }
 
 /** Leniently normalize a workflow.json (including runs from older tooling). */
@@ -114,7 +181,9 @@ function normalizeDetails(
         ? "error"
         : a.state === "running"
           ? "running"
-          : "done";
+          : a.state === "skipped" || a.state === "interrupted"
+            ? a.state
+            : "done";
     agents.push({
       index: typeof a.index === "number" ? a.index : agents.length + 1,
       label:
@@ -132,11 +201,21 @@ function normalizeDetails(
           : undefined,
       startedAt: typeof a.startedAt === "number" ? a.startedAt : startedAt,
       finishedAt: typeof a.finishedAt === "number" ? a.finishedAt : undefined,
+      attempts:
+        typeof a.attempts === "number" &&
+        Number.isInteger(a.attempts) &&
+        a.attempts > 0
+          ? a.attempts
+          : undefined,
       error:
         typeof a.error === "string" && a.error !== "[undefined]"
           ? a.error
           : undefined,
       preview: typeof a.preview === "string" ? a.preview : "",
+      transcriptOmitted:
+        typeof a.transcriptOmitted === "string"
+          ? a.transcriptOmitted
+          : undefined,
       usage: {
         input: 0,
         output: 0,
@@ -168,6 +247,9 @@ function normalizeDetails(
 
   const status =
     record.status === "running" ||
+    record.status === "stopping" ||
+    record.status === "paused" ||
+    record.status === "interrupted" ||
     record.status === "failed" ||
     record.status === "aborted"
       ? record.status
@@ -175,6 +257,10 @@ function normalizeDetails(
 
   return {
     runId,
+    resumedFromRunId:
+      typeof record.resumedFromRunId === "string"
+        ? record.resumedFromRunId
+        : undefined,
     sessionId:
       typeof record.sessionId === "string" ? record.sessionId : undefined,
     name:
@@ -203,9 +289,25 @@ function normalizeDetails(
       typeof record.resultArtifact === "string"
         ? record.resultArtifact
         : undefined,
+    resultOmitted:
+      typeof record.resultOmitted === "string"
+        ? record.resultOmitted
+        : undefined,
     transcriptArtifact:
       typeof record.transcriptArtifact === "string"
         ? record.transcriptArtifact
+        : undefined,
+    resumable: record.resumable === false ? false : undefined,
+    resumeError:
+      typeof record.resumeError === "string" ? record.resumeError : undefined,
+    deliveryFailure:
+      record.deliveryFailure &&
+      typeof record.deliveryFailure === "object" &&
+      typeof (record.deliveryFailure as Record<string, unknown>).error ===
+        "string" &&
+      typeof (record.deliveryFailure as Record<string, unknown>).reportPath ===
+        "string"
+        ? (record.deliveryFailure as WorkflowDetails["deliveryFailure"])
         : undefined,
     error: typeof record.error === "string" ? record.error : undefined,
   };
@@ -233,7 +335,9 @@ export function loadRunEntries(
   active: Map<string, WorkflowDetails>,
   sessionId: string,
   referencedRunIds: ReadonlySet<string>,
+  options: { now?: () => number } = {},
 ): RunEntry[] {
+  const now = options.now ?? Date.now;
   let names: string[] = [];
   try {
     names = fs.readdirSync(runsDir()).filter((name) => name.startsWith("wf_"));
@@ -244,83 +348,126 @@ export function loadRunEntries(
   for (const runId of names) {
     const live = active.get(runId);
     if (live) {
-      entries.push({ runId, details: live, live: true });
+      entries.push({
+        runId,
+        details: live,
+        live: true,
+        resumable: fs.existsSync(path.join(runsDir(), runId, "script.js")),
+        resumeActive: false,
+      });
       continue;
     }
     try {
       const raw = JSON.parse(
         fs.readFileSync(path.join(runsDir(), runId, "workflow.json"), "utf8"),
       );
-      const details = normalizeDetails(runId, raw);
+      const normalized = normalizeDetails(runId, raw);
       if (
-        details &&
-        (details.sessionId === sessionId || referencedRunIds.has(runId))
+        normalized &&
+        (normalized.sessionId === sessionId || referencedRunIds.has(runId))
       ) {
         const runDir = path.join(runsDir(), runId);
-        if (details.resultArtifact) {
-          try {
-            details.result = JSON.parse(
-              fs.readFileSync(
-                path.join(runDir, path.basename(details.resultArtifact)),
-                "utf8",
-              ),
-            );
-          } catch {
-            // Keep the compact compatibility marker from workflow.json.
-          }
-        }
-        if (details.transcriptArtifact) {
-          try {
-            const transcripts = JSON.parse(
-              fs.readFileSync(
-                path.join(runDir, path.basename(details.transcriptArtifact)),
-                "utf8",
-              ),
-            ) as Record<string, unknown>;
+        const details = hydrateWorkflowResult(runDir, normalized);
+        if (details.status === "running" || details.status === "stopping") {
+          // Liveness has an authority outside this process: the run's own
+          // heartbeat. Only a run that is not live from disk is recovered.
+          const liveFromDisk = isRunLiveFromDisk(runDir, now);
+          if (!liveFromDisk) {
+            details.status = "interrupted";
+            details.finishedAt = details.finishedAt ?? now();
+            details.error =
+              details.error ?? "Recovered stale run that was not active";
             for (const agent of details.agents) {
-              agent.transcript = normalizeTranscript(
-                transcripts[String(agent.index)],
-              );
+              if (agent.state !== "running") continue;
+              agent.state = "interrupted";
+              agent.error =
+                agent.error ?? "Run ended before this agent settled";
+              agent.finishedAt = details.finishedAt;
             }
-          } catch {
-            // Older or partially written artifacts simply lack transcripts.
+            const persisted = raw as Record<string, unknown>;
+            persisted.status = details.status;
+            persisted.finishedAt = details.finishedAt;
+            persisted.error = details.error;
+            if (Array.isArray(persisted.agents)) {
+              for (const item of persisted.agents) {
+                if (!item || typeof item !== "object") continue;
+                const agent = item as Record<string, unknown>;
+                if (agent.state !== "running") continue;
+                agent.state = "interrupted";
+                agent.error =
+                  agent.error ?? "Run ended before this agent settled";
+                agent.finishedAt = details.finishedAt;
+              }
+            }
+            try {
+              writeFileAtomic(
+                path.join(runDir, "workflow.json"),
+                JSON.stringify(persisted),
+              );
+            } catch {
+              // Keep the recovered state visible even if the artifact is read-only.
+            }
           }
+          entries.push({
+            runId,
+            details,
+            live: liveFromDisk,
+            resumable:
+              details.resumable !== false &&
+              fs.existsSync(path.join(runDir, "script.js")),
+            resumeActive: false,
+          });
+          continue;
         }
-        if (details.status === "running") {
-          details.status = "aborted";
-          details.finishedAt = details.finishedAt ?? Date.now();
-          details.error =
-            details.error ?? "Recovered stale run that was not active";
-          for (const agent of details.agents) {
-            if (agent.state !== "running") continue;
-            agent.state = "error";
-            agent.error = agent.error ?? "Run ended before this agent settled";
-            agent.finishedAt = details.finishedAt;
-          }
-        }
-        entries.push({ runId, details, live: false });
+        entries.push({
+          runId,
+          details,
+          live: false,
+          resumable:
+            details.resumable !== false &&
+            fs.existsSync(path.join(runDir, "script.js")),
+          resumeActive: false,
+        });
       }
     } catch {
       // Skip unreadable runs.
     }
   }
+  const resumedFrom = new Set(
+    entries
+      .filter((entry) => entry.live && entry.details.resumedFromRunId)
+      .map((entry) => entry.details.resumedFromRunId!),
+  );
+  for (const entry of entries)
+    entry.resumeActive = resumedFrom.has(entry.runId);
   return entries.sort((a, b) => b.details.startedAt - a.details.startedAt);
 }
 
-function buildReport(details: WorkflowDetails): string {
-  const { done, failed } = countStates(details);
+function buildReport(entry: RunEntry): string {
+  const details = entry.details;
+  const { done, failed, skipped, interrupted } = countStates(details);
   const lines: string[] = [
     `# Workflow ${details.name ?? details.runId}`,
     "",
     `- Run: ${details.runId}`,
     `- Status: ${statusWord(details.status)}`,
-    `- Agents: ${done}/${details.agents.length} ok${failed ? `, ${failed} failed` : ""}`,
+    `- Agents: ${done}/${details.agents.length} ok${failed ? `, ${failed} failed` : ""}${skipped ? `, ${skipped} skipped` : ""}${interrupted ? `, ${interrupted} interrupted` : ""}`,
     `- Elapsed: ${formatElapsed(details.startedAt, details.finishedAt)}`,
   ];
   const totals = formatUsage(aggregateUsage(details.agents));
   if (totals) lines.push(`- Usage: ${totals}`);
   if (details.description) lines.push("", details.description);
   if (details.error) lines.push("", `**Error:** ${details.error}`);
+  if (details.resultOmitted)
+    lines.push("", `**Result omitted:** ${details.resultOmitted}`);
+  if (details.deliveryFailure)
+    lines.push(
+      "",
+      `**Follow-up delivery failed:** ${details.deliveryFailure.error}`,
+      `Report: ${details.deliveryFailure.reportPath}`,
+    );
+  const resumeReason = resumeUnavailableReason(entry);
+  if (resumeReason) lines.push("", `**Resume unavailable:** ${resumeReason}`);
 
   for (const group of phaseGroups(details, true)) {
     lines.push("", `## ${group.title}`, "");
@@ -329,12 +476,7 @@ function buildReport(details: WorkflowDetails): string {
       continue;
     }
     for (const agent of group.agents) {
-      const status =
-        agent.state === "done"
-          ? "ok"
-          : agent.state === "error"
-            ? "FAILED"
-            : "running";
+      const status = agentStateWord(agent.state);
       const stats = [
         agentModelLabel(agent),
         agentContext(agent),
@@ -388,6 +530,7 @@ export class WorkflowDashboard {
   private sessionId: string;
   private referencedRunIds: ReadonlySet<string>;
   private close: () => void;
+  private controls?: WorkflowDashboardControls;
 
   constructor(
     tui: TUI,
@@ -398,6 +541,7 @@ export class WorkflowDashboard {
     referencedRunIds: ReadonlySet<string>,
     close: () => void,
     initialRunId?: string,
+    controls?: WorkflowDashboardControls,
   ) {
     this.tui = tui;
     this.theme = theme;
@@ -406,6 +550,7 @@ export class WorkflowDashboard {
     this.sessionId = sessionId;
     this.referencedRunIds = referencedRunIds;
     this.close = close;
+    this.controls = controls;
     this.refresh();
     if (initialRunId) {
       const entry = this.entries.find(
@@ -485,10 +630,44 @@ export class WorkflowDashboard {
     if (!entry) return;
     const target = path.join(runsDir(), entry.runId, "report.md");
     try {
-      fs.writeFileSync(target, buildReport(entry.details), "utf8");
+      fs.writeFileSync(target, buildReport(entry), "utf8");
       this.notice = `saved ${shortenHome(target)}`;
     } catch (error) {
       this.notice = `save failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.noticeAt = Date.now();
+  }
+
+  private applyControlAction(action: WorkflowControlAction) {
+    const controls = this.controls;
+    if (!controls) return;
+    try {
+      switch (action.action) {
+        case "stop":
+          controls.stop(action.runId);
+          break;
+        case "pause":
+          controls.pause(action.runId);
+          break;
+        case "skipAgent":
+          if (!controls.skipAgent(action.runId, action.index))
+            this.notice = "agent is no longer running";
+          break;
+        case "retryAgent":
+          if (!controls.retryAgent(action.runId, action.index))
+            this.notice = "agent cannot be retried";
+          break;
+        case "resume":
+          void controls.resume(action.runId).catch((error) => {
+            this.notice =
+              error instanceof Error ? error.message : String(error);
+            this.noticeAt = Date.now();
+            this.tui.requestRender();
+          });
+          break;
+      }
+    } catch (error) {
+      this.notice = error instanceof Error ? error.message : String(error);
     }
     this.noticeAt = Date.now();
   }
@@ -503,6 +682,33 @@ export class WorkflowDashboard {
       this.keybindings.matches(data, "tui.editor.cursorRight") || data === "l";
     const confirm = this.keybindings.matches(data, "tui.select.confirm");
     const cancel = this.keybindings.matches(data, "tui.select.cancel");
+    const selectedRun =
+      this.view === "list" ? this.entries[this.listIndex] : this.current;
+    const focus =
+      this.view !== "list" && this.detailFocus === "agents" ? "agent" : "run";
+    const controlAction = resolveWorkflowControlAction({
+      key: data,
+      run: selectedRun,
+      agent: focus === "agent" ? this.selectedAgent() : undefined,
+      focus,
+    });
+    if (controlAction) {
+      this.applyControlAction(controlAction);
+      this.refresh();
+      this.tui.requestRender();
+      return;
+    }
+    const controlNotice = resolveWorkflowControlNotice({
+      key: data,
+      run: selectedRun,
+      focus,
+    });
+    if (controlNotice) {
+      this.notice = controlNotice;
+      this.noticeAt = Date.now();
+      this.tui.requestRender();
+      return;
+    }
 
     if (this.view === "list") {
       if (up) {
@@ -623,7 +829,7 @@ export class WorkflowDashboard {
         height,
       );
     } else if (this.view === "detail" && this.current) {
-      lines = this.renderDetail(this.current.details, width, height);
+      lines = this.renderDetail(this.current, width, height);
     } else {
       lines = this.renderList(width, height);
     }
@@ -737,8 +943,8 @@ export class WorkflowDashboard {
       const label = selected
         ? theme.fg("accent", name)
         : theme.fg("text", name);
-      const { done, failed } = countStates(d);
-      const settled = done + failed;
+      const { done, failed, skipped, interrupted } = countStates(d);
+      const settled = done + failed + skipped + interrupted;
       const right =
         theme.fg(
           "dim",
@@ -752,7 +958,7 @@ export class WorkflowDashboard {
     lines.push(...this.panel("Runs", rows, width, panelHeight));
     lines.push(
       this.hintLine(
-        `${this.keys("tui.select.up")}/${this.keys("tui.select.down")} select · ${this.keys("tui.select.confirm")} open · ${this.keys("tui.select.cancel")} close`,
+        `${this.keys("tui.select.up")}/${this.keys("tui.select.down")} select · ${this.keys("tui.select.confirm")} open · x stop · p pause · r resume · ${this.keys("tui.select.cancel")} close`,
         width,
       ),
     );
@@ -760,15 +966,16 @@ export class WorkflowDashboard {
   }
 
   private renderDetail(
-    d: WorkflowDetails,
+    entry: RunEntry,
     width: number,
     height: number,
   ): string[] {
+    const d = entry.details;
     const theme = this.theme;
     const lines: string[] = [];
 
-    const { done, failed } = countStates(d);
-    const settled = done + failed;
+    const { done, failed, skipped, interrupted } = countStates(d);
+    const settled = done + failed + skipped + interrupted;
     const right =
       theme.fg(
         "dim",
@@ -847,7 +1054,14 @@ export class WorkflowDashboard {
           selected && this.detailFocus === "agents"
             ? theme.fg("accent", "❯")
             : " ";
-        const stats = [agentModelLabel(agent), agentContext(agent)]
+        const stats = [
+          agentStateWord(agent.state),
+          agentModelLabel(agent),
+          agentContext(agent),
+          agent.attempts !== undefined
+            ? `${agent.attempts} attempt${agent.attempts === 1 ? "" : "s"}`
+            : undefined,
+        ]
           .filter(Boolean)
           .join(" · ");
         const label =
@@ -884,6 +1098,44 @@ export class WorkflowDashboard {
         ),
       );
     }
+    if (d.resultOmitted) {
+      agentRows.push("");
+      agentRows.push(
+        truncateToWidth(
+          ` ${theme.fg("warning", `result omitted: ${d.resultOmitted}`)}`,
+          agentsInner,
+          "…",
+        ),
+      );
+    }
+    if (d.deliveryFailure) {
+      agentRows.push("");
+      agentRows.push(
+        truncateToWidth(
+          ` ${theme.fg("warning", `follow-up delivery failed: ${d.deliveryFailure.error}`)}`,
+          agentsInner,
+          "…",
+        ),
+      );
+      agentRows.push(
+        truncateToWidth(
+          ` ${theme.fg("dim", `report: ${shortenHome(d.deliveryFailure.reportPath)}`)}`,
+          agentsInner,
+          "…",
+        ),
+      );
+    }
+    const resumeReason = resumeUnavailableReason(entry);
+    if (resumeReason) {
+      agentRows.push("");
+      agentRows.push(
+        truncateToWidth(
+          ` ${theme.fg("warning", `resume unavailable: ${resumeReason}`)}`,
+          agentsInner,
+          "…",
+        ),
+      );
+    }
 
     const agentCount = selectedGroup?.agents.length ?? 0;
     const agentsTitle = selectedGroup
@@ -907,8 +1159,8 @@ export class WorkflowDashboard {
 
     const hint =
       this.detailFocus === "phases"
-        ? `j/k select phase · l/${this.keys("tui.editor.cursorRight")}/${this.keys("tui.select.confirm")} agents · ${this.keys("tui.select.cancel")} back · s save report`
-        : `j/k select agent · h/${this.keys("tui.editor.cursorLeft")}/${this.keys("tui.select.cancel")} phases · ${this.keys("tui.select.confirm")} transcript · s save report`;
+        ? `j/k select phase · l/${this.keys("tui.editor.cursorRight")}/${this.keys("tui.select.confirm")} agents · x stop · p pause · r resume · ${this.keys("tui.select.cancel")} back · s save report`
+        : `j/k select agent · x skip · r retry · h/${this.keys("tui.editor.cursorLeft")}/${this.keys("tui.select.cancel")} phases · ${this.keys("tui.select.confirm")} transcript · s save report`;
     lines.push(this.hintLine(hint, width));
     return lines;
   }
@@ -920,7 +1172,9 @@ export class WorkflowDashboard {
       return [
         theme.fg(
           "dim",
-          " transcript unavailable (this run predates transcript capture)",
+          agent.transcriptOmitted
+            ? ` transcript omitted: ${agent.transcriptOmitted}`
+            : " transcript unavailable (this run predates transcript capture)",
         ),
       ];
     }
@@ -955,6 +1209,7 @@ export class WorkflowDashboard {
     const right = theme.fg(
       "dim",
       [
+        agentStateWord(agent.state),
         agentModelLabel(agent),
         agentContext(agent),
         formatElapsed(agent.startedAt, agent.finishedAt),
@@ -995,7 +1250,7 @@ export class WorkflowDashboard {
     lines.push(...this.panel(position, visible, width, panelHeight));
     lines.push(
       this.hintLine(
-        "j/k scroll · ctrl-u/d page · g/G top/bottom · h/left/esc back",
+        "j/k scroll · ctrl-u/d page · g/G top/bottom · x skip · r retry · h/left/esc back",
         width,
       ),
     );
@@ -1040,6 +1295,7 @@ export async function showWorkflowDashboard(
   ctx: ExtensionContext,
   getActive: () => Map<string, WorkflowDetails>,
   initialRunId?: string,
+  controls?: WorkflowDashboardControls,
 ): Promise<void> {
   await ctx.ui.custom<void>(
     (tui, theme, keybindings, done) => {
@@ -1055,6 +1311,7 @@ export async function showWorkflowDashboard(
           done(undefined);
         },
         initialRunId,
+        controls,
       );
       return dashboard;
     },

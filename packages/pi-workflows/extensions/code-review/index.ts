@@ -29,7 +29,7 @@ import { loadLastEffort, saveLastEffort } from "./state.ts";
 import type { Runner } from "./target.ts";
 import { registerCodeReviewTool } from "./tool.ts";
 
-const COMPLETIONS = [...EFFORT_LEVELS, ...MODES, "ultra", "--fix", "--comment"];
+const COMPLETIONS = [...EFFORT_LEVELS, ...MODES, "--fix", "--comment"];
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -57,11 +57,6 @@ function argNotes(parsed: ParsedArgs): string[] {
   const notes: string[] = [];
   if (parsed.unrecognizedLevel)
     notes.push(`ignored unrecognized level "${parsed.unrecognizedLevel}"`);
-  if (parsed.ultra)
-    notes.push(
-      "ultra cloud review is Claude-Code-only; running a local max review",
-    );
-  if (parsed.postIgnored) notes.push("--post/--no-post ignored (ultra-only)");
   return notes;
 }
 

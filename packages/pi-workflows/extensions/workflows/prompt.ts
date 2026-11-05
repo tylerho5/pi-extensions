@@ -1,4 +1,5 @@
 import {
+  agentStateWord,
   countStates,
   formatElapsed,
   resultJson,
@@ -15,7 +16,7 @@ export const WORKFLOW_PARAMETER_DESCRIPTIONS = {
   background:
     "Defaults to true: the tool returns a run id immediately and you receive a follow-up message when the workflow finishes. Set false to block on the run and watch live progress instead.",
   resumeFromRunId:
-    "Run id of a prior workflow to resume from. Completed agent() calls with unchanged (prompt, options) return their cached results instantly; only edited or new calls re-run.",
+    "Run id of a prior workflow to resume from. Agent calls whose prompt and options are unchanged replay their cached results; a failed, skipped, or edited call and every later call re-run.",
   budgetTokens:
     "Output-token target for this run, exposed to the script as `budget`. A HARD ceiling: once reached, further agent() calls throw. Defaults to the /workflows-budget setting (unlimited unless configured).",
 };
@@ -47,7 +48,7 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
   "The script runs as an async function body with these primitives:",
   "• export const meta = { name, description, phases: [{ title, detail? }] } — metadata for the progress UI. Declare all phases up front.",
   "• phase(title) — mark the current phase at runtime (use titles from meta.phases).",
-  "• await agent(prompt, { label?, phase?, schema?, tier?, model?, provider?, effort?, isolation? }) — run ONE subagent in an isolated context and wait for it. Without `schema`, returns its final text as a string. With `schema` (a JSON Schema), the subagent is forced to call a structured_output tool and agent() returns the validated object — no parsing needed. Returns null if the agent fails or is rejected by a cap, so filter with .filter(Boolean); the reason is recorded on the run, not in the value. Use `tier` for normal work — `fast` for bounded mechanical work or lookups, `standard` for normal coding/research/review (the default when omitted), `deep` for uncertain, cross-cutting, architectural, or adversarial work; the user maps each tier to a harness, model, and effort. Pass `model`/`provider`/`effort` only when the user named that model or explicitly asked for an override, and never together with `tier`. Workflow agents cannot use the `claude` tier (this runner has no Claude harness). CC-style aliases (haiku/sonnet/opus) also work — they resolve through the user's `modelAliases` config or fall back to the default. `effort` sets the thinking level (off|minimal|low|medium|high|xhigh|max); a tier supplies its own effort, and an explicit target inherits the parent session's level. A user-configured cost ceiling may reject an expensive model you pick yourself. `isolation: 'worktree'` runs the agent in a fresh git worktree — EXPENSIVE, use ONLY when agents mutate files in parallel and would otherwise conflict; the worktree is auto-removed if unchanged. Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate or ask the user.",
+  "• await agent(prompt, { label?, phase?, schema?, tier?, model?, provider?, effort?, isolation?, stallMs? }) — run ONE subagent in an isolated context and wait for it. Without `schema`, returns its final text as a string. With `schema` (a JSON Schema), the subagent is forced to call a structured_output tool and agent() returns the validated object — no parsing needed. Returns null if the agent fails, is skipped by the user, or is rejected by the call cap (a budget-exhausted call throws instead), so filter with .filter(Boolean) and read the reason on the run; a failed or skipped call is journaled as failed and is not cached, so a resume retries it. Use `tier` for normal work — `fast` for bounded mechanical work or lookups, `standard` for normal coding/research/review (the default when omitted), `deep` for uncertain, cross-cutting, architectural, or adversarial work; the user maps each tier to a harness, model, and effort. Pass `model`/`provider`/`effort` only when the user named that model or explicitly asked for an override, and never together with `tier`. Workflow agents cannot use the `claude` tier (this runner has no Claude harness). CC-style aliases (haiku/sonnet/opus) also work — they resolve through the user's `modelAliases` config or fall back to the default. `effort` sets the thinking level (off|minimal|low|medium|high|xhigh|max); a tier supplies its own effort, and an explicit target inherits the parent session's level. A user-configured cost ceiling may reject an expensive model you pick yourself. `isolation: 'worktree'` runs the agent in a fresh git worktree — EXPENSIVE, use ONLY when agents mutate files in parallel and would otherwise conflict; the worktree is auto-removed if unchanged. Children receive normal built-ins and trust-appropriate extensions, settings, skills, and AGENTS.md context, but cannot recursively orchestrate or ask the user.",
   "• await pipeline(items, stage1, stage2, ...) — run each item through all stages independently, NO barrier between stages. Item A can be in stage 3 while item B is still in stage 1. This is the DEFAULT for multi-stage work. Wall-clock = slowest single-item chain, not sum-of-slowest-per-stage. Every stage callback receives (prevResult, originalItem, index) — use originalItem/index in later stages to label work without threading context through stage 1's return value. A stage that throws drops that item to `null` and skips its remaining stages, so `.filter(Boolean)` the results.",
   "• await parallel([() => agent(...), () => agent(...)], { concurrency? }) — run zero-argument thunks concurrently and return results in order. This is a BARRIER: it awaits every thunk before returning. Use ONLY when you genuinely need all results together. A thunk that throws resolves to `null` in the result array — the call itself never rejects, so `.filter(Boolean)` before using the results.",
   "• log(message) — emit a progress line to the user; it is also replayed in the run's completion report.",
@@ -57,7 +58,7 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
   "",
   "Every agent() call must be awaited — the run fails if the script returns with an unawaited or unsettled call. Pass a `schema` whenever a later step branches on the result, so you get typed fields instead of prose.",
   "",
-  "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. Concurrent agent() calls are capped run-wide at min(16, cpu cores - 2) — excess calls queue and run as slots free up, nested parallel() calls queue behind the same limit rather than multiplying it, and pipeline() holds no script-level slot at all. You can still pass 100 items to parallel()/pipeline() and they all complete; only that many run at any moment. Total agent count across a workflow's lifetime is capped at 1000 — a runaway-loop backstop set far above any real workflow; past it, calls resolve null. A single parallel()/pipeline() call accepts at most 4096 items; passing more is an explicit error, not a silent truncation. There is no overall deadline, but each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly, goes 3 minutes without progress before being aborted as stalled, and each individual child tool call times out after 30 minutes, becomes an error tool result, and leaves that agent free to recover. Artifacts are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
+  "Workflow JavaScript runs in a restricted, killable child with no imports, eval, timers, filesystem, network, or process APIs. Concurrent agent() calls are capped run-wide at min(16, cpu cores - 2) — excess calls queue and run as slots free up, nested parallel() calls queue behind the same limit rather than multiplying it, and pipeline() holds no script-level slot at all. You can still pass 100 items to parallel()/pipeline() and they all complete; only that many run at any moment. Total agent count across a workflow's lifetime is capped at 1000 — a runaway-loop backstop set far above any real workflow; past it, calls resolve null. A single parallel()/pipeline() call accepts at most 4096 items; passing more is an explicit error, not a silent truncation. There is no overall deadline, but each agent must receive its first assistant response event within 45 seconds so silent provider requests fail clearly, goes 3 minutes without progress before being aborted as stalled and retried up to five times (`stallMs` overrides that window; ordinary provider errors are never retried), and each individual child tool call times out after 30 minutes, becomes an error tool result, and leaves that agent free to recover. Artifacts are saved under ~/.pi/agent/workflows/<runId>/ for inspection.",
   "",
   "DEFAULT TO pipeline(). Only reach for a barrier (parallel between stages) when you genuinely need ALL prior-stage results together.",
   "",
@@ -151,7 +152,7 @@ export const WORKFLOW_TOOL_DESCRIPTION = [
   "",
   "## Resume",
   "",
-  "The tool result includes a runId. To resume after an abort, a failure, or a script edit, relaunch with the corrected script and `resumeFromRunId` set to that id — the longest unchanged prefix of agent() calls returns cached results instantly; the first edited or new call, and everything after it, runs live. Same script + same args → 100% cache hit. A call matches only if both its prompt and its options are byte-identical, so vary nothing you do not intend to re-run. Before diagnosing why a completed workflow returned an empty or unexpected result, read ~/.pi/agent/workflows/<runId>/journal.jsonl — it records each agent's actual return value; do not assume cached results are non-empty. Prompts built from Date.now()/Math.random() differ on every replay and will always miss the cache; pass such values in through `args` instead.",
+  "The tool result includes a runId. To resume after an abort, a failure, or a script edit, relaunch with the corrected script and `resumeFromRunId` set to that id — successful calls replay from the journal, while a failed or edited call and every later call run live. An interrupted call that started but never settled reruns on its own, and later verified results still replay. A call matches only if its prompt and options are byte-identical, so vary nothing you do not intend to re-run. Only success is cached: a null result, a skip, or a lossy value is a failure, never a cache entry. Before diagnosing why a completed workflow returned an empty or unexpected result, read ~/.pi/agent/workflows/<runId>/journal.jsonl — it records each agent's actual return value; do not assume cached results are non-empty. Prompts built from Date.now()/Math.random() differ on every replay and will always miss the cache; pass such values in through `args` instead.",
 ].join("\n");
 
 /** Adds workflow orchestration primitives and background execution to the model's tool prompt. */
@@ -199,11 +200,11 @@ export function buildWorkflowResultMessage(
   details: WorkflowDetails,
   runDir: string,
 ) {
-  const { done, failed } = countStates(details);
+  const { done, failed, skipped, interrupted } = countStates(details);
   const elapsed = formatElapsed(details.startedAt, details.finishedAt);
   const lines = [
     `Workflow ${details.name ? `"${details.name}"` : details.runId} ${details.status} — ` +
-      `${done}/${details.agents.length} agents ok${failed ? `, ${failed} failed` : ""} ` +
+      `${done}/${details.agents.length} agents ok${failed ? `, ${failed} failed` : ""}${skipped ? `, ${skipped} skipped` : ""}${interrupted ? `, ${interrupted} interrupted` : ""} ` +
       `across ${details.phases.length} phase(s) in ${elapsed}.`,
     `Run dir: ${shortenHome(runDir)}`,
   ];
@@ -211,20 +212,21 @@ export function buildWorkflowResultMessage(
   if (cached > 0)
     lines.push(`Replayed ${cached} cached agent(s) from journal.`);
   if (details.status !== "completed") {
-    lines.push(
-      `To resume after fixing the script: workflow({ script, resumeFromRunId: "${details.runId}" }) — unchanged agent() calls return cached.`,
-    );
+    if (details.resumable === false) {
+      lines.push(
+        `Resume unavailable: ${details.resumeError ?? "journal is non-resumable"}.`,
+      );
+    } else {
+      lines.push(
+        `To resume after fixing the script: workflow({ script, resumeFromRunId: "${details.runId}" }) — unchanged agent() calls return cached.`,
+      );
+    }
   }
   if (details.error) lines.push(`Error: ${details.error}`);
   if (details.agents.length > 0) {
     lines.push("", "Agents:");
     for (const agent of details.agents) {
-      const status =
-        agent.state === "done"
-          ? "ok"
-          : agent.state === "error"
-            ? "FAILED"
-            : "running";
+      const status = agentStateWord(agent.state);
       lines.push(
         `- [${agent.label}]${agent.phase ? ` (${agent.phase})` : ""} ${status}` +
           (agent.error ? ` — ${agent.error}` : ""),
@@ -235,7 +237,11 @@ export function buildWorkflowResultMessage(
     lines.push("", "Log:");
     for (const message of details.logs) lines.push(`- ${message}`);
   }
-  if (details.result !== undefined)
+  // An omitted result wins over a present one: a >1 MiB aggregate can leave both
+  // fields set, and a truncated value under "Result:" reads as complete.
+  if (details.resultOmitted)
+    lines.push("", `Result: not stored (${details.resultOmitted})`);
+  else if (details.result !== undefined)
     lines.push("", "Result:", resultJson(details.result));
   return lines.join("\n");
 }

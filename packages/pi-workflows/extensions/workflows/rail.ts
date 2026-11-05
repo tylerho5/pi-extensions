@@ -48,13 +48,13 @@ export function workflowRailModel(
 ): WorkflowRailModel {
   const runs = [...active.values()].sort((a, b) => b.startedAt - a.startedAt);
   const rows = runs.slice(0, MAX_RAIL_ROWS).map((details) => {
-    const { done, failed } = countStates(details);
+    const { done, failed, skipped, interrupted } = countStates(details);
     return {
       runId: details.runId,
       label: details.name ?? details.runId,
       status: details.status,
       ...(details.currentPhase ? { phase: details.currentPhase } : {}),
-      done: done + failed,
+      done: done + failed + skipped + interrupted,
       total: details.agents.length,
       elapsed: formatElapsed(details.startedAt, details.finishedAt),
     };

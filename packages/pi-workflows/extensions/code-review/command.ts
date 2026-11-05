@@ -33,17 +33,13 @@ export interface ParsedArgs {
   target: string;
   fix: boolean;
   comment: boolean;
-  /** The `ultra` subcommand (cloud-only in CC; a local max review here). */
-  ultra: boolean;
   /** A first token that looked like a mistyped level (warned, then ignored). */
   unrecognizedLevel?: string;
-  /** `--post`/`--no-post` were present; they are ultra-only, so ignored. */
-  postIgnored: boolean;
 }
 
 export interface ResolvedEffort {
   level: Effort;
-  source: "explicit" | "last-used" | "default" | "ultra";
+  source: "explicit" | "last-used" | "default";
 }
 
 function isEffort(token: string): token is Effort {
@@ -59,13 +55,11 @@ export function parseArgs(raw: string): ParsedArgs {
 
   let fix = false;
   let comment = false;
-  let postIgnored = false;
   const positionals: string[] = [];
 
   for (const token of tokens) {
     if (token === "--fix") fix = true;
     else if (token === "--comment") comment = true;
-    else if (token === "--post" || token === "--no-post") postIgnored = true;
     else if (token.startsWith("--"))
       continue; // unknown flag: ignore
     else positionals.push(token);
@@ -73,7 +67,6 @@ export function parseArgs(raw: string): ParsedArgs {
 
   let explicit: Effort | undefined;
   let mode: Mode = "fanout";
-  let ultra = false;
   let unrecognizedLevel: string | undefined;
 
   // The leading positionals hold an optional mode token and an optional level
@@ -86,9 +79,6 @@ export function parseArgs(raw: string): ParsedArgs {
     if (!modeFilled && isMode(t)) {
       mode = t;
       modeFilled = true;
-    } else if (!levelFilled && t === "ultra") {
-      ultra = true;
-      levelFilled = true;
     } else if (!levelFilled && isEffort(t)) {
       explicit = t;
       levelFilled = true;
@@ -111,9 +101,7 @@ export function parseArgs(raw: string): ParsedArgs {
     target: positionals.join(" "),
     fix,
     comment,
-    ultra,
     unrecognizedLevel,
-    postIgnored,
   };
 }
 
@@ -130,6 +118,5 @@ export function resolveEffort(
   parsed: ParsedArgs,
   lastUsed?: Effort,
 ): ResolvedEffort {
-  if (parsed.ultra) return { level: "max", source: "ultra" };
   return resolveEffortInput(parsed.explicit, lastUsed);
 }

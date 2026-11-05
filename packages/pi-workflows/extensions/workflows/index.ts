@@ -37,16 +37,24 @@ import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
 import { reportRunning } from "../shared/agent-activity.ts";
-import { registerWorkflowRuntime } from "../shared/workflow-runtime.ts";
+import {
+  registerWorkflowRuntime,
+  type OrchestrationDSL,
+} from "../shared/workflow-runtime.ts";
+import { hydrateWorkflowResult, isRunLiveFromDisk } from "./artifacts.ts";
 import {
   formatBudget,
   loadDefaultBudget,
   parseBudget,
   saveDefaultBudget,
 } from "./budget.ts";
-import { sessionWorkflowRunIds, showWorkflowDashboard } from "./dashboard.ts";
+import {
+  sessionWorkflowRunIds,
+  showWorkflowDashboard,
+  type WorkflowDashboardControls,
+} from "./dashboard.ts";
 import { renderWorkflowCompletion } from "./completion.ts";
-import { createResumePlan, readJournal } from "./journal.ts";
+import { createResumePlan, loadResumePlan, readJournal } from "./journal.ts";
 import {
   compactToolDetails,
   createLaunch,
@@ -61,6 +69,7 @@ import {
 import {
   agentContext,
   aggregateUsage,
+  agentStateWord,
   countStates,
   formatElapsed,
   formatUsage,
@@ -81,6 +90,7 @@ import {
   WORKFLOW_TOOL_DESCRIPTION,
 } from "./prompt.ts";
 import { createWorkflowResources, runAgent } from "./runner.ts";
+import { writeFileAtomic } from "./serialization.ts";
 import { createWorkflowRail } from "./rail.ts";
 import {
   describeSavedWorkflows,
@@ -137,6 +147,112 @@ interface RunSummary {
   active: boolean;
 }
 
+function createWorkflowOrchestrator(
+  prepared: ReturnType<typeof prepareWorkflowScript>,
+  args: unknown,
+  ctx: ExtensionContext,
+) {
+  return (dsl: OrchestrationDSL) => {
+    const budget = () => ({
+      total: dsl.budget.total,
+      spent: dsl.budget.spent(),
+      remaining: dsl.budget.remaining(),
+    });
+    const onAgent =
+      dsl.agent as unknown as RunWorkflowSandboxOptions["onAgent"];
+    const runNestedWorkflow = async (
+      name: string,
+      nestedArgs: unknown,
+      signal: AbortSignal,
+    ) => {
+      const saved = findSavedWorkflow(ctx.cwd, name);
+      if (!saved) {
+        const available = listSavedWorkflows(ctx.cwd)
+          .map((workflow) => workflow.name)
+          .join(", ");
+        return {
+          error: `Workflow "${name}" not found. Available: ${available || "(none)"}`,
+        };
+      }
+      let nestedPrepared: ReturnType<typeof prepareWorkflowScript>;
+      try {
+        nestedPrepared = prepareWorkflowScript(saved.script);
+      } catch (error) {
+        return {
+          error: `Nested workflow "${name}" failed to parse: ${errorText(error)}`,
+        };
+      }
+      dsl.log(`▸ ${name}`);
+      try {
+        const result = await runWorkflowSandbox({
+          source: nestedPrepared.source,
+          args: nestedArgs,
+          cwd: ctx.cwd,
+          signal,
+          onAgent,
+          onPhase: dsl.phase,
+          onLog: dsl.log,
+          budget,
+        });
+        return { result };
+      } catch (error) {
+        return { error: errorText(error) };
+      }
+    };
+
+    return runWorkflowSandbox({
+      source: prepared.source,
+      args,
+      cwd: ctx.cwd,
+      signal: dsl.signal,
+      onAgent,
+      onPhase: dsl.phase,
+      onLog: dsl.log,
+      budget,
+      onNestedWorkflow: runNestedWorkflow,
+    });
+  };
+}
+
+function persistRunDetails(runDir: string, details: WorkflowDetails) {
+  writeFileAtomic(path.join(runDir, "workflow.json"), JSON.stringify(details));
+}
+
+function hasLiveResume(
+  sourceRunId: string,
+  activeRuns: Map<string, ActiveRun>,
+): boolean {
+  if (
+    [...activeRuns.values()].some(
+      (run) => run.details.resumedFromRunId === sourceRunId,
+    )
+  ) {
+    return true;
+  }
+  const base = path.join(getAgentDir(), "workflows");
+  let names: string[];
+  try {
+    names = fs.readdirSync(base).filter((name) => name.startsWith("wf_"));
+  } catch {
+    return false;
+  }
+  return names.some((name) => {
+    const runDir = path.join(base, name);
+    try {
+      const details = JSON.parse(
+        fs.readFileSync(path.join(runDir, "workflow.json"), "utf8"),
+      ) as Partial<WorkflowDetails>;
+      return (
+        details.resumedFromRunId === sourceRunId &&
+        (details.status === "running" || details.status === "stopping") &&
+        isRunLiveFromDisk(runDir)
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
 function listRuns(
   activeRuns: Map<string, WorkflowDetails>,
   sessionId: string,
@@ -173,17 +289,37 @@ function listRuns(
         continue;
       }
       const agents = parsed.agents ?? [];
+      // Absence from this instance's map is not proof the run is dead; only a
+      // stale heartbeat on disk is.
+      const activeStatus =
+        parsed.status === "running" || parsed.status === "stopping";
+      const runDir = path.join(base, runId);
+      const onDiskLive = activeStatus && isRunLiveFromDisk(runDir);
+      if (activeStatus && !onDiskLive) {
+        parsed.status = "interrupted";
+        parsed.finishedAt = parsed.finishedAt ?? Date.now();
+        parsed.error =
+          parsed.error ?? "Recovered stale run that was not active";
+        for (const agent of parsed.agents ?? []) {
+          if (agent.state !== "running") continue;
+          agent.state = "interrupted";
+          agent.error = agent.error ?? "Run ended before this agent settled";
+          agent.finishedAt = parsed.finishedAt;
+        }
+        try {
+          persistRunDetails(runDir, parsed as WorkflowDetails);
+        } catch {
+          // Keep the recovered state visible if the artifact is read-only.
+        }
+      }
       summaries.push({
         runId,
         name: parsed.name,
-        status:
-          parsed.status === "running"
-            ? "aborted"
-            : (parsed.status ?? "unknown"),
+        status: parsed.status ?? "unknown",
         done: agents.filter((agent) => agent.state !== "running").length,
         total: agents.length,
         startedAt: parsed.startedAt ?? 0,
-        active: false,
+        active: onDiskLive,
       });
     } catch {
       // Ignore unreadable artifacts because their session cannot be verified.
@@ -203,7 +339,10 @@ function runDetailText(
     const parsed = JSON.parse(
       fs.readFileSync(path.join(runDir, "workflow.json"), "utf8"),
     ) as WorkflowDetails;
-    return buildWorkflowResultMessage(parsed, runDir);
+    return buildWorkflowResultMessage(
+      hydrateWorkflowResult(runDir, parsed),
+      runDir,
+    );
   } catch {
     return `Run ${run.runId} — ${run.status}`;
   }
@@ -219,6 +358,7 @@ export default function workflows(pi: ExtensionAPI) {
 
   /** Finished counts remain visible until the dashboard acknowledges them. */
   let lastUi: ExtensionContext["ui"] | undefined;
+  let controlContext: ExtensionContext | undefined;
   let completedRuns = 0;
   let failedRuns = 0;
 
@@ -275,7 +415,7 @@ export default function workflows(pi: ExtensionAPI) {
 
   const recordSettledRun = (status: WorkflowDetails["status"]) => {
     if (status === "completed") completedRuns += 1;
-    else failedRuns += 1;
+    else if (status === "failed" || status === "aborted") failedRuns += 1;
   };
 
   const launch = createLaunch({
@@ -294,9 +434,128 @@ export default function workflows(pi: ExtensionAPI) {
   // through the shared seam without importing this extension.
   registerWorkflowRuntime({ launch });
 
+  const startResume = (runId: string, retryIndex?: number) => {
+    if (!/^wf_[0-9a-f]{12}$/.test(runId))
+      throw new Error(`Invalid workflow run id "${runId}"`);
+    if (activeRuns.has(runId) || hasLiveResume(runId, activeRuns))
+      throw new Error(`Workflow run ${runId} is still active`);
+    const ctx = controlContext;
+    if (!ctx) throw new Error("Workflow controls are not available yet");
+
+    const runDir = path.join(getAgentDir(), "workflows", runId);
+    const detailsPath = path.join(runDir, "workflow.json");
+    if (!fs.existsSync(detailsPath))
+      throw new Error(`Workflow run ${runId} has no saved details to resume`);
+    const details = JSON.parse(
+      fs.readFileSync(detailsPath, "utf8"),
+    ) as WorkflowDetails;
+    if (
+      details.sessionId !== ctx.sessionManager.getSessionId() &&
+      !sessionWorkflowRunIds(ctx).has(runId)
+    ) {
+      throw new Error(`Workflow run ${runId} is not available in this session`);
+    }
+    if (details.status === "running" || details.status === "stopping") {
+      if (isRunLiveFromDisk(runDir))
+        throw new Error(`Workflow run ${runId} is still active`);
+      details.status = "interrupted";
+      details.finishedAt = details.finishedAt ?? Date.now();
+      details.error =
+        details.error ?? "Recovered stale run that was not active";
+      for (const agent of details.agents) {
+        if (agent.state !== "running") continue;
+        agent.state = "interrupted";
+        agent.error = agent.error ?? "Run ended before this agent settled";
+        agent.finishedAt = details.finishedAt;
+      }
+      persistRunDetails(runDir, details);
+    }
+
+    if (retryIndex === undefined) {
+      if (details.status !== "paused" && details.status !== "interrupted")
+        throw new Error(
+          `Workflow run ${runId} cannot be resumed from ${details.status}`,
+        );
+    } else {
+      const agent = details.agents.find((item) => item.index === retryIndex);
+      if (
+        !agent ||
+        (agent.state !== "error" &&
+          agent.state !== "skipped" &&
+          agent.state !== "interrupted")
+      ) {
+        throw new Error(
+          `Agent ${retryIndex} in workflow run ${runId} cannot be retried`,
+        );
+      }
+    }
+
+    const scriptPath = path.join(runDir, "script.js");
+    if (!fs.existsSync(scriptPath))
+      throw new Error(`Workflow run ${runId} has no saved script to resume`);
+    const script = fs.readFileSync(scriptPath, "utf8");
+    const prepared = prepareWorkflowScript(script);
+    let args: unknown;
+    let argsRaw: string | undefined;
+    try {
+      argsRaw = fs.readFileSync(path.join(runDir, "args.json"), "utf8");
+      try {
+        args = JSON.parse(argsRaw);
+      } catch {
+        args = argsRaw;
+      }
+    } catch {
+      args = undefined;
+    }
+    if (details.resumable === false) {
+      throw new Error(
+        `Workflow run ${runId} cannot be resumed: ${details.resumeError ?? "journal is non-resumable"}`,
+      );
+    }
+    const resumePlan = loadResumePlan(
+      runDir,
+      activeRuns.has(runId) || isRunLiveFromDisk(runDir),
+    );
+    const selectedResumePlan =
+      retryIndex === undefined
+        ? resumePlan
+        : createResumePlan(
+            readJournal(runDir).filter((entry) => entry.index < retryIndex - 1),
+          );
+    const extraArtifacts: Record<string, string> = { "script.js": script };
+    if (argsRaw !== undefined) extraArtifacts["args.json"] = argsRaw;
+    launch(
+      {
+        meta: prepared.meta,
+        background: ctx.hasUI,
+        delivery: "model-followup",
+        resumePlan: selectedResumePlan,
+        resumeFromRunId: runId,
+        extraArtifacts,
+        orchestrate: createWorkflowOrchestrator(prepared, args, ctx),
+      },
+      ctx,
+    );
+  };
+
+  const dashboardControls: WorkflowDashboardControls = {
+    stop: (runId) => activeRuns.get(runId)?.stop(),
+    pause: (runId) => activeRuns.get(runId)?.pause(),
+    skipAgent: (runId, index) =>
+      activeRuns.get(runId)?.skipAgent(index) ?? false,
+    retryAgent: (runId, index) => {
+      startResume(runId, index);
+      return true;
+    },
+    resume: async (runId) => {
+      startResume(runId);
+    },
+  };
+
   pi.registerMessageRenderer("workflow-completion", renderWorkflowCompletion);
 
   pi.on("session_start", (_event, ctx) => {
+    controlContext = ctx;
     if (ctx.hasUI) lastUi = ctx.ui;
     mountWorkflowRail(ctx);
     updateIndicator();
@@ -327,6 +586,7 @@ export default function workflows(pi: ExtensionAPI) {
     railRefresh = undefined;
     lastUi?.setStatus("workflows", undefined);
     lastUi = undefined;
+    controlContext = undefined;
   });
 
   pi.registerCommand("workflows-budget", {
@@ -361,7 +621,13 @@ export default function workflows(pi: ExtensionAPI) {
       const arg = rawArgs.trim();
       if (ctx.mode === "tui") {
         lastUi = ctx.ui;
-        await showWorkflowDashboard(ctx, activeDetails, arg || undefined);
+        controlContext = ctx;
+        await showWorkflowDashboard(
+          ctx,
+          activeDetails,
+          arg || undefined,
+          dashboardControls,
+        );
         // Opening the dashboard acknowledges finished runs.
         completedRuns = 0;
         failedRuns = 0;
@@ -413,6 +679,7 @@ export default function workflows(pi: ExtensionAPI) {
     parameters: WorkflowParams,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      controlContext = ctx;
       let script: string;
       if (params.name) {
         const saved = findSavedWorkflow(ctx.cwd, params.name);
@@ -458,11 +725,44 @@ export default function workflows(pi: ExtensionAPI) {
           `Invalid resumeFromRunId "${params.resumeFromRunId}" (expected a wf_… run id)`,
         );
       }
-      const resumePlan = createResumePlan(
-        resumeFrom
-          ? readJournal(path.join(getAgentDir(), "workflows", resumeFrom))
-          : [],
-      );
+      let resumePlan = createResumePlan([]);
+      if (resumeFrom) {
+        if (activeRuns.has(resumeFrom) || hasLiveResume(resumeFrom, activeRuns))
+          throw new Error(`Workflow run ${resumeFrom} is still active`);
+        const priorDir = path.join(getAgentDir(), "workflows", resumeFrom);
+        const priorPath = path.join(priorDir, "workflow.json");
+        if (!fs.existsSync(priorPath))
+          throw new Error(
+            `Workflow run ${resumeFrom} has no saved details to resume`,
+          );
+        const prior = JSON.parse(
+          fs.readFileSync(priorPath, "utf8"),
+        ) as WorkflowDetails;
+        if (prior.status === "running" || prior.status === "stopping") {
+          if (isRunLiveFromDisk(priorDir))
+            throw new Error(`Workflow run ${resumeFrom} is still active`);
+          prior.status = "interrupted";
+          prior.finishedAt = prior.finishedAt ?? Date.now();
+          prior.error =
+            prior.error ?? "Recovered stale run that was not active";
+          for (const agent of prior.agents) {
+            if (agent.state !== "running") continue;
+            agent.state = "interrupted";
+            agent.error = agent.error ?? "Run ended before this agent settled";
+            agent.finishedAt = prior.finishedAt;
+          }
+          persistRunDetails(priorDir, prior);
+        }
+        if (prior.resumable === false) {
+          throw new Error(
+            `Workflow run ${resumeFrom} cannot be resumed: ${prior.resumeError ?? "journal is non-resumable"}`,
+          );
+        }
+        resumePlan = loadResumePlan(
+          priorDir,
+          activeRuns.has(resumeFrom) || isRunLiveFromDisk(priorDir),
+        );
+      }
 
       // CC runs every workflow in the background; blocking is the opt-out.
       // A headless session has nowhere to deliver the follow-up, so it blocks.
@@ -478,74 +778,11 @@ export default function workflows(pi: ExtensionAPI) {
           budgetTokens: params.budgetTokens,
           delivery: "model-followup",
           resumePlan,
+          resumeFromRunId: resumeFrom,
           extraArtifacts,
           signal,
           onToolUpdate: (update) => onUpdate?.(update),
-          orchestrate: (dsl) => {
-            // The sandbox core reads live budget numbers off the DSL view.
-            const budget = () => ({
-              total: dsl.budget.total,
-              spent: dsl.budget.spent(),
-              remaining: dsl.budget.remaining(),
-            });
-            // agentFn accepts loose options + an optional signal at runtime;
-            // the sandbox's onAgent type is looser than the clean DSL facade.
-            const onAgent =
-              dsl.agent as unknown as RunWorkflowSandboxOptions["onAgent"];
-            // A nested run reuses the parent DSL, so its agents land on the
-            // same controller, counter, budget, and progress tree. Passing no
-            // onNestedWorkflow to the child sandbox is what enforces one level.
-            const runNestedWorkflow = async (
-              name: string,
-              nestedArgs: unknown,
-            ) => {
-              const saved = findSavedWorkflow(ctx.cwd, name);
-              if (!saved) {
-                const available = listSavedWorkflows(ctx.cwd)
-                  .map((workflow) => workflow.name)
-                  .join(", ");
-                return {
-                  error: `Workflow "${name}" not found. Available: ${available || "(none)"}`,
-                };
-              }
-              let nestedPrepared: ReturnType<typeof prepareWorkflowScript>;
-              try {
-                nestedPrepared = prepareWorkflowScript(saved.script);
-              } catch (error) {
-                return {
-                  error: `Nested workflow "${name}" failed to parse: ${errorText(error)}`,
-                };
-              }
-              dsl.log(`▸ ${name}`);
-              try {
-                const result = await runWorkflowSandbox({
-                  source: nestedPrepared.source,
-                  args: nestedArgs,
-                  cwd: ctx.cwd,
-                  signal: dsl.signal,
-                  onAgent,
-                  onPhase: dsl.phase,
-                  onLog: dsl.log,
-                  budget,
-                });
-                return { result };
-              } catch (error) {
-                return { error: errorText(error) };
-              }
-            };
-
-            return runWorkflowSandbox({
-              source: prepared.source,
-              args,
-              cwd: ctx.cwd,
-              signal: dsl.signal,
-              onAgent,
-              onPhase: dsl.phase,
-              onLog: dsl.log,
-              budget,
-              onNestedWorkflow: runNestedWorkflow,
-            });
-          },
+          orchestrate: createWorkflowOrchestrator(prepared, args, ctx),
         },
         ctx,
       );
@@ -615,8 +852,8 @@ export default function workflows(pi: ExtensionAPI) {
         );
       }
 
-      const { done, failed } = countStates(details);
-      const settled = done + failed;
+      const { done, failed, skipped, interrupted } = countStates(details);
+      const settled = done + failed + skipped + interrupted;
       const elapsed = formatElapsed(details.startedAt, details.finishedAt);
       let header =
         `${theme.fg(statusColor(details.status), SQUARE)} ${theme.fg("toolTitle", theme.bold("workflow "))}` +
@@ -627,6 +864,9 @@ export default function workflows(pi: ExtensionAPI) {
         ) +
         theme.fg(statusColor(details.status), statusWord(details.status));
       if (failed) header += theme.fg("error", ` · ${failed} failed`);
+      if (skipped) header += theme.fg("dim", ` · ${skipped} skipped`);
+      if (interrupted)
+        header += theme.fg("warning", ` · ${interrupted} interrupted`);
       if (details.background) header += theme.fg("dim", " (background)");
       if (details.status === "running" && details.currentPhase) {
         header += theme.fg("muted", ` · ${details.currentPhase}`);
@@ -641,7 +881,7 @@ export default function workflows(pi: ExtensionAPI) {
             agent.phase ? theme.fg("dim", ` (${agent.phase})`) : ""
           }${theme.fg(
             "dim",
-            `${context ? ` · ${context}` : ""} · ${formatElapsed(agent.startedAt, agent.finishedAt)}`,
+            ` · ${agentStateWord(agent.state)}${context ? ` · ${context}` : ""}${agent.attempts !== undefined ? ` · ${agent.attempts} attempt${agent.attempts === 1 ? "" : "s"}` : ""} · ${formatElapsed(agent.startedAt, agent.finishedAt)}`,
           )}`;
         }
         if (totals) text += `\n  ${theme.fg("dim", `Total: ${totals}`)}`;
@@ -669,7 +909,14 @@ export default function workflows(pi: ExtensionAPI) {
           const context = agentContext(agent);
           let line = `${stateSquare(agent.state, theme)} ${theme.fg("accent", agent.label)} ${theme.fg(
             "dim",
-            [context, formatElapsed(agent.startedAt, agent.finishedAt)]
+            [
+              agentStateWord(agent.state),
+              context,
+              agent.attempts !== undefined
+                ? `${agent.attempts} attempt${agent.attempts === 1 ? "" : "s"}`
+                : undefined,
+              formatElapsed(agent.startedAt, agent.finishedAt),
+            ]
               .filter(Boolean)
               .join(" · "),
           )}`;
@@ -693,6 +940,20 @@ export default function workflows(pi: ExtensionAPI) {
         );
       }
 
+      if (details.resumable === false) {
+        container.addChild(new Spacer(1));
+        container.addChild(
+          new Text(
+            theme.fg(
+              "warning",
+              `Resume unavailable: ${details.resumeError ?? "journal is non-resumable"}`,
+            ),
+            0,
+            0,
+          ),
+        );
+      }
+
       if (details.result !== undefined) {
         container.addChild(new Spacer(1));
         container.addChild(new Text(theme.fg("muted", "─── result ───"), 0, 0));
@@ -702,6 +963,15 @@ export default function workflows(pi: ExtensionAPI) {
             0,
             0,
             getMarkdownTheme(),
+          ),
+        );
+      } else if (details.resultOmitted) {
+        container.addChild(new Spacer(1));
+        container.addChild(
+          new Text(
+            theme.fg("warning", `Result not stored: ${details.resultOmitted}`),
+            0,
+            0,
           ),
         );
       }

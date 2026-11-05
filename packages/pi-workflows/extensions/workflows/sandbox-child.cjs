@@ -60,8 +60,11 @@ const BOOTSTRAP = String.raw`
     },
   });
   let nextRequestId = 0;
+  let nextNestedRequestId = 0;
   const unconsumed = new Set();
   const inFlight = new Set();
+  const unconsumedNested = new Set();
+  const inFlightNested = new Set();
 
   function deepFreeze(value, depth = 0) {
     if (!value || typeof value !== "object" || depth > 32 || Object.isFrozen(value)) return value;
@@ -192,19 +195,50 @@ const BOOTSTRAP = String.raw`
   // Runs a saved workflow inline as a sub-step. The child shares this run's
   // concurrency cap, agent counter, abort signal, and budget. One level only:
   // the host rejects a workflow() call made from inside a nested run.
-  async function workflow(nameOrRef, workflowArgs) {
+  function workflow(nameOrRef, workflowArgs) {
+    const id = ++nextNestedRequestId;
     const name = typeof nameOrRef === "string" ? nameOrRef : undefined;
-    if (!name) throw new Error("workflow() expects a saved workflow name");
-    let payload;
-    try {
-      payload = JSON.stringify({ name, args: workflowArgs });
-    } catch (error) {
-      throw new Error("workflow() args must be serializable: " + error.message);
+    let requestError;
+    let started;
+    unconsumedNested.add(id);
+    if (!name) {
+      requestError = new Error("workflow() expects a saved workflow name");
+    } else {
+      let payload;
+      try {
+        payload = JSON.stringify({ name, args: workflowArgs });
+      } catch (error) {
+        requestError = new Error("workflow() args must be serializable: " + error.message);
+      }
+      if (!requestError) {
+        inFlightNested.add(id);
+        started = callHost("workflow", payload)
+          .then((json) => {
+            const settled = JSON.parse(json);
+            if (settled && settled.error) throw new Error(settled.error);
+            return settled ? settled.result : null;
+          })
+          .finally(() => inFlightNested.delete(id));
+      }
     }
-    const json = await callHost("workflow", payload);
-    const settled = JSON.parse(json);
-    if (settled && settled.error) throw new Error(settled.error);
-    return settled ? settled.result : null;
+    const begin = () => {
+      unconsumedNested.delete(id);
+      return requestError ? Promise.reject(requestError) : started;
+    };
+    return Object.freeze({
+      then(resolve, reject) {
+        return begin().then(resolve, reject);
+      },
+      catch(reject) {
+        return begin().catch(reject);
+      },
+      finally(callback) {
+        return begin().finally(callback);
+      },
+      get [Symbol.toStringTag]() {
+        return "Promise";
+      },
+    });
   }
 
   // Refreshed by the host on every settled agent() call, so spent()/remaining()
@@ -254,6 +288,8 @@ const BOOTSTRAP = String.raw`
       value: Object.freeze(() => ({
         unconsumed: unconsumed.size,
         inFlight: inFlight.size,
+        unconsumedNested: unconsumedNested.size,
+        inFlightNested: inFlightNested.size,
       })),
       writable: false,
       configurable: false,
@@ -412,6 +448,12 @@ function run(source, argsJson, maxConcurrency, budgetJson) {
           }
           if (pending.inFlight > 0) {
             throw new Error("Workflow returned before " + pending.inFlight + " agent call(s) settled");
+          }
+          if (pending.unconsumedNested > 0) {
+            throw new Error("Workflow created " + pending.unconsumedNested + " unawaited nested workflow() call(s)");
+          }
+          if (pending.inFlightNested > 0) {
+            throw new Error("Workflow returned before " + pending.inFlightNested + " nested workflow() call(s) settled");
           }
           return __workflowSerialize(value);
         });

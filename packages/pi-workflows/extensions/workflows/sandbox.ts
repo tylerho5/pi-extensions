@@ -4,9 +4,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BudgetView } from "./budget.ts";
 import { DEFAULT_CONCURRENCY } from "./controller.ts";
-import { safeStringify, toSerializable } from "./serialization.ts";
+import { MAX_WORKFLOW_SOURCE_BYTES } from "./meta.ts";
+import { losslessJsonStringify } from "./serialization.ts";
 
-const MAX_SOURCE_BYTES = 512 * 1024;
+const MAX_SOURCE_BYTES = MAX_WORKFLOW_SOURCE_BYTES;
 const MAX_ARGS_BYTES = 256 * 1024;
 const MAX_RESULT_BYTES = 1024 * 1024;
 const MAX_AGENT_MESSAGE_BYTES = 512 * 1024;
@@ -21,6 +22,8 @@ export interface SandboxAgentOptions {
   provider?: unknown;
   effort?: unknown;
   isolation?: unknown;
+  requireWork?: unknown;
+  stallMs?: unknown;
 }
 
 /**
@@ -48,6 +51,7 @@ export interface RunWorkflowSandboxOptions {
   onNestedWorkflow?: (
     name: string,
     args: unknown,
+    signal: AbortSignal,
   ) => Promise<{ result?: unknown; error?: string }>;
 }
 
@@ -84,6 +88,10 @@ function sanitizeAgentOptions(value: unknown): SandboxAgentOptions {
     ...(value.provider !== undefined ? { provider: value.provider } : {}),
     ...(value.effort !== undefined ? { effort: value.effort } : {}),
     ...(value.isolation !== undefined ? { isolation: value.isolation } : {}),
+    ...(value.requireWork !== undefined
+      ? { requireWork: value.requireWork }
+      : {}),
+    ...(value.stallMs !== undefined ? { stallMs: value.stallMs } : {}),
   };
 }
 
@@ -106,11 +114,16 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
     );
   }
 
-  const argsJson = safeStringify(
-    { defined: options.args !== undefined, value: options.args },
-    { maxBytes: MAX_ARGS_BYTES, maxDepth: 16, maxNodes: 10_000 },
-  );
-  if (byteLength(argsJson) > MAX_ARGS_BYTES) {
+  let argsJson: string;
+  try {
+    argsJson = losslessJsonStringify(
+      {
+        defined: options.args !== undefined,
+        ...(options.args !== undefined ? { value: options.args } : {}),
+      },
+      MAX_ARGS_BYTES,
+    );
+  } catch {
     return Promise.reject(new Error("Workflow args exceed the IPC limit"));
   }
 
@@ -139,6 +152,7 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
     const token = randomBytes(24).toString("hex");
     const requestIds = new Set<number>();
     const activeAgentRequests = new Map<number, AbortController>();
+    const activeNestedRequests = new Map<number, AbortController>();
     let requestCount = 0;
     let finished = false;
 
@@ -147,6 +161,10 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
         abortController.abort(new Error("Workflow stopped"));
       }
       activeAgentRequests.clear();
+      for (const abortController of activeNestedRequests.values()) {
+        abortController.abort(new Error("Workflow stopped"));
+      }
+      activeNestedRequests.clear();
       options.signal.removeEventListener("abort", onAbort);
       child.removeAllListeners("message");
       child.removeAllListeners("error");
@@ -251,13 +269,22 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
         const nestedId = payload.id;
         const reply = (settled: { result?: unknown; error?: string }) => {
           if (finished || !child.connected) return;
+          let resultJson: string;
+          try {
+            resultJson = losslessJsonStringify(
+              settled,
+              MAX_AGENT_MESSAGE_BYTES,
+            );
+          } catch {
+            resultJson = JSON.stringify({
+              error: "Nested workflow result exceeded the IPC limit",
+            });
+          }
           child.send({
             token,
             kind: "workflowResult",
             id: nestedId,
-            resultJson: JSON.stringify(
-              toSerializable(settled, { maxDepth: 16, maxNodes: 10_000 }),
-            ),
+            resultJson,
           });
         };
         const handler = options.onNestedWorkflow;
@@ -265,9 +292,22 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
           reply({ error: "workflow() cannot be nested more than one level" });
           return;
         }
-        void handler(payload.name, payload.args)
+        const abortController = new AbortController();
+        const abortNested = () =>
+          abortController.abort(
+            options.signal.reason ?? new Error("Workflow stopped"),
+          );
+        if (options.signal.aborted) abortNested();
+        else
+          options.signal.addEventListener("abort", abortNested, { once: true });
+        activeNestedRequests.set(nestedId, abortController);
+        void handler(payload.name, payload.args, abortController.signal)
           .then(reply)
-          .catch((error) => reply({ error: errorText(error) }));
+          .catch((error) => reply({ error: errorText(error) }))
+          .finally(() => {
+            activeNestedRequests.delete(nestedId);
+            options.signal.removeEventListener("abort", abortNested);
+          });
         return;
       }
       if (raw.kind === "agent") {
@@ -307,17 +347,24 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
         const id = payload.id;
         const abortController = new AbortController();
         const sendResult = (result: SandboxAgentResult) => {
-          if (!activeAgentRequests.delete(id)) return;
-          if (finished || !child.connected) return;
-          const normalized = toSerializable(result, {
-            maxDepth: 16,
-            maxNodes: 10_000,
-            maxStringBytes: 128 * 1024,
-          });
-          let resultJson = JSON.stringify(normalized ?? null);
-          if (byteLength(resultJson) > MAX_AGENT_MESSAGE_BYTES) {
-            resultJson = JSON.stringify(null);
+          if (!activeAgentRequests.has(id)) return;
+          if (finished || !child.connected) {
+            activeAgentRequests.delete(id);
+            return;
           }
+          let resultJson: string;
+          try {
+            resultJson = losslessJsonStringify(result, MAX_AGENT_MESSAGE_BYTES);
+          } catch {
+            sendFailure(
+              new Error(
+                "Agent result exceeded the IPC limit or was not JSON data",
+              ),
+            );
+            return;
+          }
+          activeAgentRequests.delete(id);
+          if (finished || !child.connected) return;
           child.send({
             token,
             kind: "agentResult",
@@ -359,8 +406,7 @@ export function runWorkflowSandbox(options: RunWorkflowSandboxOptions) {
           return;
         }
         try {
-          const normalized = toSerializable(JSON.parse(raw.resultJson));
-          finish(undefined, JSON.parse(JSON.stringify(normalized)));
+          finish(undefined, JSON.parse(raw.resultJson));
         } catch (error) {
           finish(
             new Error(`Workflow returned invalid JSON: ${errorText(error)}`),

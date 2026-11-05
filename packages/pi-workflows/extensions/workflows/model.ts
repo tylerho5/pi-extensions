@@ -39,8 +39,16 @@ export function emptyUsage(): AgentUsage {
   };
 }
 
-export type AgentState = "running" | "done" | "error";
-export type WorkflowStatus = "running" | "completed" | "failed" | "aborted";
+export type AgentState =
+  "running" | "done" | "error" | "skipped" | "interrupted";
+export type WorkflowStatus =
+  | "running"
+  | "stopping"
+  | "paused"
+  | "interrupted"
+  | "completed"
+  | "failed"
+  | "aborted";
 
 export type TranscriptRole =
   "user" | "assistant" | "thinking" | "tool" | "toolResult";
@@ -78,19 +86,31 @@ export interface AgentRecord {
   contextWindow?: number;
   startedAt: number;
   finishedAt?: number;
+  /** Total attempts made, including the first; set once the agent runs. */
+  attempts?: number;
   /** Replayed from a prior run's journal rather than executed. */
   cached?: boolean;
-  /** Retained git worktree path when the agent left uncommitted changes. */
+  /** Retained git worktree path when the agent changed files or added commits. */
   worktree?: string;
   error?: string;
   preview: string;
   usage: AgentUsage;
   /** Normalized, serializable subagent conversation shown by /workflows. */
   transcript: TranscriptEntry[];
+  /** Why the transcript is empty when its shard could not be stored. */
+  transcriptOmitted?: string;
+}
+
+/** Persisted completion-delivery failure with a link to the saved report. */
+export interface WorkflowDeliveryFailure {
+  error: string;
+  reportPath: string;
 }
 
 export interface WorkflowDetails {
   runId: string;
+  /** Run whose journal this replay uses, when this was resumed from a prior run. */
+  resumedFromRunId?: string;
   /** Pi session that launched this run. */
   sessionId?: string;
   name?: string;
@@ -106,22 +126,75 @@ export interface WorkflowDetails {
   logs?: string[];
   result?: unknown;
   resultArtifact?: string;
+  /** Why the result artifact is missing (e.g. it exceeded the storage limit). */
+  resultOmitted?: string;
   transcriptArtifact?: string;
+  /** Set when the background completion follow-up could not be delivered. */
+  deliveryFailure?: WorkflowDeliveryFailure;
+  /** False when its journal could not safely support a future replay. */
+  resumable?: boolean;
+  resumeError?: string;
   error?: string;
 }
 
 /** Colored square state indicator (no emojis/glyphs). */
 export const SQUARE = "■";
 
+/** Leniently normalize stored transcript entries, dropping unknown shapes. */
+export function normalizeTranscript(value: unknown): TranscriptEntry[] {
+  if (!Array.isArray(value)) return [];
+  const transcript: TranscriptEntry[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Record<string, unknown>;
+    if (
+      entry.role !== "user" &&
+      entry.role !== "assistant" &&
+      entry.role !== "thinking" &&
+      entry.role !== "tool" &&
+      entry.role !== "toolResult"
+    ) {
+      continue;
+    }
+    if (typeof entry.text !== "string") continue;
+    transcript.push({
+      role: entry.role,
+      text: entry.text,
+      name: typeof entry.name === "string" ? entry.name : undefined,
+      toolCallId:
+        typeof entry.toolCallId === "string" ? entry.toolCallId : undefined,
+      isError: entry.isError === true,
+      timestamp:
+        typeof entry.timestamp === "number" ? entry.timestamp : undefined,
+      startedAt:
+        typeof entry.startedAt === "number" ? entry.startedAt : undefined,
+      finishedAt:
+        typeof entry.finishedAt === "number" ? entry.finishedAt : undefined,
+      durationMs:
+        typeof entry.durationMs === "number" ? entry.durationMs : undefined,
+    });
+  }
+  return transcript;
+}
+
 export function stateSquare(state: AgentState, theme: Theme): string {
   if (state === "done") return theme.fg("success", SQUARE);
   if (state === "error") return theme.fg("error", SQUARE);
+  if (state === "skipped") return theme.fg("dim", SQUARE);
+  if (state === "interrupted") return theme.fg("warning", SQUARE);
   return theme.fg("warning", SQUARE);
 }
 
 export function statusSquare(status: WorkflowStatus, theme: Theme): string {
   if (status === "completed") return theme.fg("success", SQUARE);
-  if (status === "running") return theme.fg("warning", SQUARE);
+  if (
+    status === "running" ||
+    status === "stopping" ||
+    status === "paused" ||
+    status === "interrupted"
+  ) {
+    return theme.fg("warning", SQUARE);
+  }
   return theme.fg("error", SQUARE);
 }
 
@@ -129,11 +202,24 @@ export function statusWord(status: WorkflowStatus): string {
   return status === "completed" ? "done" : status;
 }
 
+export function agentStateWord(state: AgentState): string {
+  if (state === "done") return "done";
+  if (state === "error") return "failed";
+  return state;
+}
+
 export function statusColor(
   status: WorkflowStatus,
 ): "success" | "warning" | "error" {
   if (status === "completed") return "success";
-  if (status === "running") return "warning";
+  if (
+    status === "running" ||
+    status === "stopping" ||
+    status === "paused" ||
+    status === "interrupted"
+  ) {
+    return "warning";
+  }
   return "error";
 }
 
@@ -208,12 +294,16 @@ export function countStates(details: WorkflowDetails) {
   let done = 0;
   let failed = 0;
   let running = 0;
+  let skipped = 0;
+  let interrupted = 0;
   for (const agent of details.agents) {
     if (agent.state === "done") done++;
     else if (agent.state === "error") failed++;
-    else running++;
+    else if (agent.state === "running") running++;
+    else if (agent.state === "skipped") skipped++;
+    else if (agent.state === "interrupted") interrupted++;
   }
-  return { done, failed, running };
+  return { done, failed, running, skipped, interrupted };
 }
 
 export interface PhaseGroup {

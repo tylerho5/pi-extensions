@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -6,6 +7,161 @@ export interface SerializationOptions {
   maxDepth?: number;
   maxNodes?: number;
   maxStringBytes?: number;
+}
+
+export const MAX_CALL_KEY_INPUT_BYTES = 512 * 1024;
+const LOSSLESS_MAX_DEPTH = 64;
+const LOSSLESS_MAX_NODES = 50_000;
+
+/** Serialize JSON data without normalizing or truncating any value. */
+export function losslessJsonStringify(
+  value: unknown,
+  maxBytes = MAX_CALL_KEY_INPUT_BYTES,
+): string {
+  const output: string[] = [];
+  const active = new WeakSet<object>();
+  let bytes = 0;
+  let nodes = 0;
+
+  const append = (part: string) => {
+    bytes += byteLength(part);
+    if (bytes > maxBytes)
+      throw new Error(`JSON value exceeds the ${maxBytes} byte limit`);
+    output.push(part);
+  };
+
+  const encode = (current: unknown, depth: number): void => {
+    if (++nodes > LOSSLESS_MAX_NODES || depth > LOSSLESS_MAX_DEPTH)
+      throw new Error("JSON value exceeds the lossless serialization limits");
+    if (current === null) {
+      append("null");
+      return;
+    }
+    if (typeof current === "boolean") {
+      append(current ? "true" : "false");
+      return;
+    }
+    if (typeof current === "string") {
+      if (byteLength(current) > maxBytes)
+        throw new Error(`JSON string exceeds the ${maxBytes} byte limit`);
+      append(JSON.stringify(current));
+      return;
+    }
+    if (typeof current === "number") {
+      if (!Number.isFinite(current))
+        throw new Error("JSON number must be finite");
+      append(Object.is(current, -0) ? "-0" : String(current));
+      return;
+    }
+    if (typeof current !== "object")
+      throw new Error(`Value of type ${typeof current} is not JSON data`);
+    if (active.has(current)) throw new Error("JSON value contains a cycle");
+    active.add(current);
+    try {
+      if (Array.isArray(current)) {
+        if (Object.getOwnPropertySymbols(current).length > 0)
+          throw new Error("JSON array has symbol properties");
+        const names = Object.getOwnPropertyNames(current).filter(
+          (name) => name !== "length",
+        );
+        if (names.length !== current.length)
+          throw new Error("JSON array has holes or extra properties");
+        append("[");
+        for (let index = 0; index < current.length; index++) {
+          if (index > 0) append(",");
+          const descriptor = Object.getOwnPropertyDescriptor(
+            current,
+            String(index),
+          );
+          if (!descriptor?.enumerable || !("value" in descriptor))
+            throw new Error("JSON array contains a non-data property");
+          encode(descriptor.value, depth + 1);
+        }
+        append("]");
+        return;
+      }
+
+      const prototype = Object.getPrototypeOf(current);
+      if (prototype !== Object.prototype && prototype !== null)
+        throw new Error("JSON object must have a plain prototype");
+      if (Object.getOwnPropertySymbols(current).length > 0)
+        throw new Error("JSON object has symbol properties");
+      const names = Object.getOwnPropertyNames(current).sort();
+      append("{");
+      for (let index = 0; index < names.length; index++) {
+        const name = names[index]!;
+        const descriptor = Object.getOwnPropertyDescriptor(current, name);
+        if (!descriptor?.enumerable || !("value" in descriptor))
+          throw new Error("JSON object contains a non-data property");
+        if (index > 0) append(",");
+        if (byteLength(name) > maxBytes)
+          throw new Error(`JSON key exceeds the ${maxBytes} byte limit`);
+        append(JSON.stringify(name));
+        append(":");
+        encode(descriptor.value, depth + 1);
+      }
+      append("}");
+    } finally {
+      active.delete(current);
+    }
+  };
+
+  encode(value, 0);
+  return output.join("");
+}
+
+function sortJsonKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonKeys);
+  if (value === null || typeof value !== "object") return value;
+  const result: Record<string, unknown> = Object.create(null);
+  for (const key of Object.keys(value).sort())
+    result[key] = sortJsonKeys((value as Record<string, unknown>)[key]);
+  return result;
+}
+
+/** Versioned key over the complete call input and the preceding call key. */
+export function callKey(
+  prompt: string,
+  options: unknown,
+  previousKey?: string,
+): string {
+  try {
+    const canonical = losslessJsonStringify(
+      { version: 2, prompt, options, previousKey: previousKey ?? null },
+      MAX_CALL_KEY_INPUT_BYTES,
+    );
+    return `v2:${createHash("sha256").update(canonical).digest("hex")}`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/byte limit/.test(message))
+      throw new Error(
+        `Workflow call input exceeds the ${MAX_CALL_KEY_INPUT_BYTES} byte limit`,
+      );
+    throw new Error(`Workflow call input is not lossless JSON: ${message}`);
+  }
+}
+
+/** Candidate key for old unversioned records; undefined means unverifiable. */
+export function legacyCallKey(
+  prompt: string,
+  options: unknown,
+): string | undefined {
+  try {
+    losslessJsonStringify({ prompt, options }, MAX_CALL_KEY_INPUT_BYTES);
+    const input = { prompt, options: sortJsonKeys(options) };
+    losslessJsonStringify(input, MAX_CALL_KEY_INPUT_BYTES);
+    const legacy = JSON.stringify(toSerializable(input));
+    if (typeof legacy !== "string") return undefined;
+    if (
+      losslessJsonStringify(JSON.parse(legacy), MAX_CALL_KEY_INPUT_BYTES) !==
+      losslessJsonStringify(input, MAX_CALL_KEY_INPUT_BYTES)
+    ) {
+      return undefined;
+    }
+    return createHash("sha256").update(legacy).digest("hex").slice(0, 32);
+  } catch {
+    return undefined;
+  }
 }
 
 const DEFAULT_MAX_BYTES = 1024 * 1024;

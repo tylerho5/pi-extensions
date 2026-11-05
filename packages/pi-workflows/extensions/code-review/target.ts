@@ -6,6 +6,11 @@
  * range (`a..b`) → that range, a ref → `<ref>...HEAD`, anything else → a path.
  * The command runner is injected so this resolves against canned output in
  * tests and a real `exec` in the handler.
+ *
+ * A scope also records the revision its diff describes and the commit the
+ * review agents' file reads resolve to (`rev`, `treeSha`). A PR or range target
+ * resolves against a commit that need not be checked out, so the two can differ
+ * and the prompts pin reads to `rev` when they do.
  */
 
 export interface ReviewScope {
@@ -16,6 +21,17 @@ export interface ReviewScope {
   isPr: boolean;
   diffText: string;
   changedLines: number;
+  /** Revision the diff describes; "" when it could not be resolved. */
+  rev: string;
+  /** Commit the agents' file reads resolve to. */
+  treeSha: string;
+}
+
+/** Scope label plus the reviewed revision when it is not the working tree. */
+export function reviewLabel(scope: ReviewScope): string {
+  return scope.rev && scope.rev !== scope.treeSha
+    ? `${scope.label} @ ${scope.rev.slice(0, 12)}`
+    : scope.label;
 }
 
 export type Runner = (
@@ -33,6 +49,41 @@ async function refExists(
     cwd,
   );
   return code === 0;
+}
+
+/** The SHA a ref resolves to, or "" when it does not resolve. */
+async function resolveRef(
+  run: Runner,
+  cwd: string,
+  ref: string,
+): Promise<string> {
+  const { stdout, code } = await run(
+    ["git", "rev-parse", "--verify", "--quiet", ref],
+    cwd,
+  );
+  return code === 0 ? stdout.trim() : "";
+}
+
+/** The PR's head SHA, or "" when gh cannot resolve it. */
+async function prHeadSha(
+  run: Runner,
+  cwd: string,
+  number: string,
+  repo?: string,
+): Promise<string> {
+  const cmd = [
+    "gh",
+    "pr",
+    "view",
+    number,
+    "--json",
+    "headRefOid",
+    "-q",
+    ".headRefOid",
+  ];
+  if (repo) cmd.push("--repo", repo);
+  const { stdout, code } = await run(cmd, cwd);
+  return code === 0 ? stdout.trim() : "";
 }
 
 async function gitDiff(
@@ -72,7 +123,11 @@ function countDiffLines(diff: string): number {
   return total;
 }
 
-async function resolveNoTarget(run: Runner, cwd: string): Promise<ReviewScope> {
+async function resolveNoTarget(
+  run: Runner,
+  cwd: string,
+  treeSha: string,
+): Promise<ReviewScope> {
   let range: string;
   if (await refExists(run, cwd, "@{upstream}")) range = "@{upstream}...HEAD";
   else if (await refExists(run, cwd, "main")) range = "main...HEAD";
@@ -99,7 +154,15 @@ async function resolveNoTarget(run: Runner, cwd: string): Promise<ReviewScope> {
     }
   }
 
-  return { range, label, isPr: false, diffText, changedLines };
+  return {
+    range,
+    label,
+    isPr: false,
+    diffText,
+    changedLines,
+    rev: treeSha,
+    treeSha,
+  };
 }
 
 export async function resolveScope(
@@ -108,8 +171,32 @@ export async function resolveScope(
   run: Runner,
 ): Promise<ReviewScope> {
   const spec = target.trim();
+  const treeSha = await resolveRef(run, cwd, "HEAD");
 
-  if (spec === "") return resolveNoTarget(run, cwd);
+  if (spec === "") return resolveNoTarget(run, cwd, treeSha);
+
+  const prUrl =
+    /^(?:https?):\/\/(github\.com|[^/]*github[^/]*)\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/(?:files|commits|checks))?\/?(?:\?[^#]*)?(?:#.*)?$/i.exec(
+      spec,
+    );
+  if (prUrl) {
+    const [, , owner, repo, number] = prUrl;
+    const diffText = (
+      await run(
+        ["gh", "pr", "diff", number!, "--repo", `${owner}/${repo}`],
+        cwd,
+      )
+    ).stdout;
+    return {
+      range: number!,
+      label: `PR #${number}`,
+      isPr: true,
+      diffText,
+      changedLines: countDiffLines(diffText),
+      rev: await prHeadSha(run, cwd, number!, `${owner}/${repo}`),
+      treeSha,
+    };
+  }
 
   if (/^\d+$/.test(spec)) {
     const diffText = (await run(["gh", "pr", "diff", spec], cwd)).stdout;
@@ -119,16 +206,21 @@ export async function resolveScope(
       isPr: true,
       diffText,
       changedLines: countDiffLines(diffText),
+      rev: await prHeadSha(run, cwd, spec),
+      treeSha,
     };
   }
 
   if (spec.includes("..")) {
+    const side = spec.slice(spec.lastIndexOf("..") + 2);
     return {
       range: spec,
       label: spec,
       isPr: false,
       diffText: await gitDiff(run, cwd, [spec]),
       changedLines: await numstatSum(run, cwd, [spec]),
+      rev: (await resolveRef(run, cwd, side)) || side,
+      treeSha,
     };
   }
 
@@ -140,6 +232,8 @@ export async function resolveScope(
       isPr: false,
       diffText: await gitDiff(run, cwd, [range]),
       changedLines: await numstatSum(run, cwd, [range]),
+      rev: treeSha,
+      treeSha,
     };
   }
 
@@ -151,5 +245,7 @@ export async function resolveScope(
     isPr: false,
     diffText: await gitDiff(run, cwd, args),
     changedLines: await numstatSum(run, cwd, args),
+    rev: treeSha,
+    treeSha,
   };
 }

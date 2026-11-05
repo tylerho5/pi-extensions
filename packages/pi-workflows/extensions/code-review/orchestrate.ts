@@ -8,7 +8,12 @@
 
 import type { OrchestrationDSL } from "../shared/workflow-runtime.ts";
 import type { Effort, Mode } from "./command.ts";
-import { categoryRank, findingKey, type Finding } from "./findings.ts";
+import {
+  categoryRank,
+  findingKey,
+  type Finding,
+  type ReviewCoverage,
+} from "./findings.ts";
 import {
   buildFinderPrompt,
   buildInlinePrompt,
@@ -22,6 +27,12 @@ import {
 import type { ReviewScope } from "./target.ts";
 
 type Verdict = "CONFIRMED" | "PLAUSIBLE" | "REFUTED";
+
+/** The orchestration result: the ranked findings plus how much of the review ran. */
+export interface ReviewResult {
+  findings: Finding[];
+  coverage: ReviewCoverage;
+}
 
 function shortSummary(summary: string): string {
   const s = summary.trim();
@@ -91,6 +102,7 @@ async function verifyOne(
           schema: VERIFIER_SCHEMA,
           phase: "Verify",
           label: `verify:${f.file}:${f.line}`,
+          requireWork: true,
         }),
     ),
   );
@@ -101,6 +113,11 @@ async function verifyOne(
   // 2-vote (max) drops only when both refute. A failed verifier never drops.
   const refuted = verdicts.filter((v) => v === "REFUTED").length;
   if (refuted >= cfg.verifyVotes) return null;
+  // Verifiers that all failed leave the candidate unverified rather than
+  // silently labelling it plausible.
+  if (verdicts.length === 0 && cfg.verifyVotes > 0) {
+    return { ...f, verdict: "UNVERIFIED" };
+  }
   const verdict: "CONFIRMED" | "PLAUSIBLE" = verdicts.includes("CONFIRMED")
     ? "CONFIRMED"
     : "PLAUSIBLE";
@@ -141,21 +158,28 @@ async function inlineReview(
     schema: FINDER_SCHEMA,
     phase: "Review",
     label: `inline:${level.level}`,
+    requireWork: true,
   });
+  if (result == null) {
+    throw new Error(
+      "Inline review agent failed; see /workflows for agent errors.",
+    );
+  }
   return rankAndCap(dedup(extractCandidates(result)), level.cap);
 }
 
 export async function reviewOrchestration(
   dsl: OrchestrationDSL,
   cfg: { level: Effort; scope: ReviewScope; mode?: Mode },
-): Promise<Finding[]> {
+): Promise<ReviewResult> {
   const level = LEVELS[cfg.level];
   const { scope } = cfg;
 
   // Inline is a single-agent sweep; low is already one agent, so it takes the
   // shared path (its hunk-scan prompt is mode-agnostic).
   if (cfg.mode === "inline" && cfg.level !== "low") {
-    return inlineReview(dsl, scope, level);
+    const findings = await inlineReview(dsl, scope, level);
+    return { findings, coverage: { steps: 1, ran: 1, missing: [] } };
   }
 
   dsl.phase("Find");
@@ -166,9 +190,19 @@ export async function reviewOrchestration(
           schema: FINDER_SCHEMA,
           phase: "Find",
           label: angle.key,
+          requireWork: true,
         }),
     ),
   );
+
+  const missing = level.angles
+    .filter((_angle, index) => finderResults[index] == null)
+    .map((angle) => angle.key);
+  if (level.angles.length > 0 && missing.length === level.angles.length) {
+    throw new Error(
+      `All ${missing.length} Find agents failed; see /workflows for per-agent errors.`,
+    );
+  }
 
   let kept = dedup(finderResults.flatMap(extractCandidates));
 
@@ -183,7 +217,11 @@ export async function reviewOrchestration(
       schema: FINDER_SCHEMA,
       phase: "Sweep",
       label: `sweep-${round + 1}`,
+      requireWork: true,
     });
+    // A sweep that produced nothing leaves its pass uncovered, and coverage is
+    // the only place that is visible.
+    if (sweepResult == null) missing.push(`sweep-${round + 1}`);
     const existing = new Set(kept.map(findingKey));
     let swept = dedup(extractCandidates(sweepResult)).filter(
       (f) => !existing.has(findingKey(f)),
@@ -194,5 +232,9 @@ export async function reviewOrchestration(
     kept.push(...swept);
   }
 
-  return rankAndCap(kept, level.cap);
+  const steps = level.angles.length + level.sweeps;
+  return {
+    findings: rankAndCap(kept, level.cap),
+    coverage: { steps, ran: steps - missing.length, missing },
+  };
 }

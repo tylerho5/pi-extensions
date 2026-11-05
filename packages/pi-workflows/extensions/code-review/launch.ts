@@ -16,11 +16,10 @@ import {
   buildCommentBlock,
   deliverCompletionNotification,
   deliverFailureNotification,
-  type Finding,
   type FindingsStore,
 } from "./findings.ts";
-import { reviewOrchestration } from "./orchestrate.ts";
-import { resolveScope, type Runner } from "./target.ts";
+import { reviewOrchestration, type ReviewResult } from "./orchestrate.ts";
+import { resolveScope, reviewLabel, type Runner } from "./target.ts";
 
 export interface ReviewRequest {
   target: string;
@@ -66,16 +65,25 @@ export function createReviewLauncher(
     }
 
     const scope = await resolveScope(request.target, ctx.cwd, run);
+    if (scope.diffText.trim() === "") {
+      const message = `Cannot review ${scope.label}: the resolved scope was empty.`;
+      ctx.ui.notify(message, "warning");
+      throw new Error(message);
+    }
 
     const wantComment = request.comment && scope.isPr;
     if (request.comment && !scope.isPr)
       ctx.ui.notify("--comment ignored (target is not a PR)", "warning");
     const repoSlug = wantComment ? await resolveRepoSlug(run, ctx.cwd) : "";
+    // The report names the revision reviewed, not just the target: a PR or range
+    // target is reviewed from a commit that need not be the working tree.
+    const label = reviewLabel(scope);
 
     // Start each review from a clean store; a later --fix report_findings merges
     // outcomes into these rows.
     store.findings = [];
     store.level = request.level;
+    store.coverage = undefined;
 
     // Inline runs as a single "Review" agent (except low, which is already a
     // single agent on the shared Find/Verify/Sweep path).
@@ -84,7 +92,7 @@ export function createReviewLauncher(
       ? [{ title: "Review" }]
       : [{ title: "Find" }, { title: "Verify" }, { title: "Sweep" }];
 
-    const handle = rt.launch<Finding[]>(
+    const handle = rt.launch<ReviewResult>(
       {
         meta: {
           name: `code-review: ${scope.label}`,
@@ -103,39 +111,64 @@ export function createReviewLauncher(
     );
 
     ctx.ui.notify(
-      `Reviewing ${scope.label} at ${request.level} (${request.mode}) — see /workflows`,
+      `Reviewing ${label} at ${request.level} (${request.mode}) — see /workflows`,
       "info",
     );
 
     // Do not block the turn: wake the parent when the run settles. An aborted
     // run (session shutdown) stays silent; a failed run hands off to the parent.
-    void handle.settled.then((outcome) => {
-      if (outcome.status === "aborted") return;
-      if (outcome.status !== "completed") {
-        deliverFailureNotification(pi, {
+    void handle.settled
+      .then((outcome) => {
+        if (
+          outcome.status === "aborted" ||
+          outcome.status === "paused" ||
+          outcome.status === "interrupted"
+        ) {
+          return;
+        }
+        if (outcome.status !== "completed") {
+          deliverFailureNotification(pi, {
+            runId: outcome.runId,
+            error: outcome.error ?? "no result",
+          });
+          return;
+        }
+        store.coverage = outcome.result?.coverage;
+        const findings = outcome.result?.findings ?? [];
+        deliverCompletionNotification(pi, {
+          level: request.level,
+          findings,
           runId: outcome.runId,
-          error: outcome.error ?? "no result",
+          scope: label,
+          fix: request.fix,
+          ...(outcome.result?.coverage
+            ? { coverage: outcome.result.coverage }
+            : {}),
+          instruction: request.fix
+            ? "Call report_findings, apply appropriate fixes, then call it again with an outcome for every finding."
+            : "Call report_findings once, summarize the findings, and do not modify files.",
         });
-        return;
-      }
-      const findings = outcome.result ?? [];
-      deliverCompletionNotification(pi, {
-        level: request.level,
-        findings,
-        runId: outcome.runId,
-        scope: scope.label,
-        fix: request.fix,
-        instruction: request.fix
-          ? "Call report_findings, apply appropriate fixes, then call it again with an outcome for every finding."
-          : "Call report_findings once, summarize the findings, and do not modify files.",
+        if (wantComment)
+          ctx.ui.notify(buildCommentBlock(findings, scope, repoSlug), "info");
+      })
+      .catch((error) => {
+        // The captured `pi` throws once this extension instance is torn down,
+        // so the handoff is lost. Fall back to the UI when it is still up.
+        try {
+          ctx.ui.notify(
+            `Review ${handle.runId} settled, but its handoff could not be delivered: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            "warning",
+          );
+        } catch {
+          // The session is gone; there is nowhere to deliver.
+        }
       });
-      if (wantComment)
-        ctx.ui.notify(buildCommentBlock(findings, scope, repoSlug), "info");
-    });
 
     return {
       runId: handle.runId,
-      scope: scope.label,
+      scope: label,
       level: request.level,
       mode: request.mode,
       fix: request.fix,

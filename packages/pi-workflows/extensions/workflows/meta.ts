@@ -13,6 +13,8 @@ import {
 
 /** Static workflow metadata and source preparation helpers. */
 
+export const MAX_WORKFLOW_SOURCE_BYTES = 512 * 1024;
+
 export interface WorkflowPhase {
   title: string;
   detail?: string;
@@ -183,6 +185,11 @@ function metadataDeclaration(statement: Program["body"][number]) {
  * Source inside strings, comments, regexes, and templates is never rewritten.
  */
 export function prepareWorkflowScript(source: string): PreparedWorkflowScript {
+  if (Buffer.byteLength(source, "utf8") > MAX_WORKFLOW_SOURCE_BYTES) {
+    throw new Error(
+      `Workflow script exceeds the ${MAX_WORKFLOW_SOURCE_BYTES} byte limit`,
+    );
+  }
   const program = parseProgram(source);
   let meta: WorkflowMeta = { phases: [] };
   let metadataRange: { start: number; end: number } | undefined;

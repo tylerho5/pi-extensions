@@ -37,10 +37,20 @@ function dotColor(category: string): ThemeColor {
   return "warning";
 }
 
+function verdictColor(verdict: NonNullable<Finding["verdict"]>): ThemeColor {
+  if (verdict === "CONFIRMED") return "warning";
+  if (verdict === "UNVERIFIED") return "error";
+  return "dim";
+}
+
 function header(report: Partial<FindingsReport>, theme: Theme): string {
   const count = report.findings?.length ?? 0;
+  const incomplete = count === 0 && (report.coverage?.missing.length ?? 0) > 0;
   return (
-    theme.fg("accent", theme.bold("code review")) +
+    theme.fg(
+      "accent",
+      theme.bold(incomplete ? "code review incomplete" : "code review"),
+    ) +
     (report.level ? theme.fg("muted", ` · ${report.level}`) : "") +
     theme.fg("muted", ` · ${count} finding${count === 1 ? "" : "s"}`)
   );
@@ -51,7 +61,7 @@ function rowLine(f: Finding, theme: Theme): string {
   const loc = theme.fg("accent", `${f.file}:${f.line}`);
   const cat = theme.fg("muted", f.category);
   const verdict = f.verdict
-    ? theme.fg(f.verdict === "CONFIRMED" ? "warning" : "dim", ` [${f.verdict}]`)
+    ? theme.fg(verdictColor(f.verdict), ` [${f.verdict}]`)
     : "";
   const outcome = f.outcome
     ? theme.fg("success", ` ${OUTCOME_GLYPH[f.outcome]}`)
@@ -76,9 +86,14 @@ export const renderCompletionNotification: MessageRenderer<
     runId: details.runId,
     scope: details.scope,
     fix: details.fix,
+    coverage: details.coverage,
   });
 
-  let head = theme.fg("accent", theme.bold("code review complete"));
+  const incomplete = digest.count === 0 && digest.missing.length > 0;
+  let head = theme.fg(
+    "accent",
+    theme.bold(incomplete ? "code review incomplete" : "code review complete"),
+  );
   head += theme.fg("muted", ` · ${digest.level}`);
   if (digest.scope) head += theme.fg("muted", ` · ${digest.scope}`);
   if (digest.fix) head += theme.fg("warning", " · fix");
@@ -91,6 +106,15 @@ export const renderCompletionNotification: MessageRenderer<
         `${digest.confirmed} confirmed · ${digest.plausible} plausible`,
     ),
   ];
+  if (digest.missing.length > 0) {
+    lines.push(
+      theme.fg(
+        "warning",
+        `partial review · ${digest.ran}/${digest.steps} steps ran · ` +
+          `no coverage from: ${digest.missing.join(", ")}`,
+      ),
+    );
+  }
   for (const f of digest.top) lines.push(rowLine(f, theme));
   lines.push(
     theme.fg(
@@ -125,6 +149,17 @@ export const renderFindings: MessageRenderer<FindingsReport> = (
   const head = header(report, theme);
 
   if (findings.length === 0) {
+    const coverage = report.coverage;
+    if (coverage && coverage.missing.length > 0) {
+      return new Text(
+        `${head}\n  ${theme.fg(
+          "warning",
+          `partial review · ${coverage.ran}/${coverage.steps} steps ran · no coverage from: ${coverage.missing.join(", ")}`,
+        )}`,
+        0,
+        0,
+      );
+    }
     return new Text(`${head}\n  ${theme.fg("success", "no findings")}`, 0, 0);
   }
 
