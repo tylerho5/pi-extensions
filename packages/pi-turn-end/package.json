@@ -1,0 +1,31 @@
+{
+  "name": "@tylerho/pi-turn-end",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Appends a one-line marker to the session each time the agent stops: how long it worked and when it stopped.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tylerho5/pi-extensions.git",
+    "directory": "packages/pi-turn-end"
+  },
+  "homepage": "https://github.com/tylerho5/pi-extensions/tree/main/packages/pi-turn-end",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/turn-end"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {}
+}
